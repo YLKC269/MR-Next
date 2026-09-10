@@ -2,7 +2,7 @@
 // v1.2 UI：kind tab + 缩略卡（hover 收藏按钮/删除勾选 + 拖拽换位）+ 灯箱预览 + 右上角悬浮「收藏入库」面板
 import { h, clear } from "../core/dom.js";
 import { viewUrl, relToViewUrl } from "../core/api.js";
-import { lightbox } from "../core/ui.js";
+import { lightbox, inlineRename } from "../core/ui.js";
 import { assetRegistry } from "../core/assets.js";
 
 const ORDER_LS_PREFIX = "mrnext.assets.order.v1."; // + `${folder}::${kind}`
@@ -212,7 +212,13 @@ export function createAssetsPanel(ctx) {
           renderFavBar();
           if (!favOpen) toggleFav(true);
         } }, "★");
-        card.appendChild(h("div", { class: "act" }, favB));
+        // ✎ 就地改名（改磁盘文件名）→ 同步收藏库 + 全画面板标记/预览
+        const renameB = h("button", { class: "abtn ren", title: "重命名这个素材（改磁盘文件名，收藏库与所有面板会同步刷新）", onclick: (e) => {
+          e.stopPropagation();
+          const nameEl = card.querySelector(".mn");
+          inlineRename(nameEl, f.name.replace(/\.[^.]+$/, ""), (newStem) => doRenameFile(f, rel, newStem));
+        } }, "✎");
+        card.appendChild(h("div", { class: "act" }, favB, renameB));
         // 提示拖拽
         card.title = `${f.name}\n（拖拽可换位 · 勾选可批量删除/收藏）`;
         card.onclick = () => { curPick = { name: f.name, rel, kind: f.kind }; renderFavBar(); if (f.kind !== "audio") lightbox(url, f.kind); };
@@ -221,6 +227,39 @@ export function createAssetsPanel(ctx) {
         grid.appendChild(card);
       }
     } catch (e) { ctx.toast("列举失败: " + e.message, true); }
+  };
+
+  // ✎ 重命名素材文件（磁盘改名）→ 收藏库同步 + 全局注册表重映射 + 广播所有面板刷新标记/预览
+  const doRenameFile = async (f, rel, newStem) => {
+    const folder = folderIn.value.trim();
+    const oldName = f.name;
+    const ext = (oldName.match(/\.[^.]+$/) || [""])[0];
+    try {
+      const res = await ctx.api.rename(rel, newStem);
+      if (!res || res.error || !res.ok) {
+        ctx.toast("改名失败：" + ((res && res.error) || "未知错误"), true);
+        await refresh();
+        return;
+      }
+      const newName = res.filename || (String(res.name || newStem) + ext);
+      if (res.renamed) {
+        // 勾选集合 / 当前选中项按名字换键，避免改名后选中态与收藏弹窗内容对不上
+        if (selSet.delete(oldName)) selSet.add(newName);
+        if (curPick && curPick.name === oldName) curPick = { ...curPick, name: newName, rel: res.rel };
+        // ① 参考绑定 rel 换新（<Picture N> / 公共前缀权威绑定不会失效）
+        // ② localStorage 自定义顺序里的旧名换新（不会被甩到列表末尾）
+        assetRegistry.remapAssets({ oldRel: rel, newRel: res.rel, oldName, newName });
+        ctx.toast(`已重命名为「${res.name}」· 收藏库与全画面板已同步`);
+      } else {
+        ctx.toast("文件名没有变化");
+      }
+      await assetRegistry.broadcastChange(folder);   // 广播：所有面板 token / 素材区实时刷新
+      await refresh();                               // 本面板重排（顺序与 <Picture N> 编号同步）
+      if (favOpen) renderFavBar();
+    } catch (e) {
+      ctx.toast("改名失败: " + e.message, true);
+      await refresh();
+    }
   };
 
   // 指针拖拽换位：mcard 自身 pointerdown 起步，shadow root 阶段监听 move/up
@@ -382,5 +421,7 @@ export function createAssetsPanel(ctx) {
   _LISTEN_TARGET.addEventListener("pointerup", _onDragUp, true);
   _LISTEN_TARGET.addEventListener("pointercancel", _onDragUp, true);
   refresh(); renderToolbar();
-  return { el, update: () => { if (favOpen) positionFavSel(); } };
+  // 其它面板改过素材（收藏库改名 / 剪辑删素材 / 时间线出片）→ 本面板实时重扫，不切走也能看到
+  assetRegistry.subscribe(() => { if (el.isConnected) refresh(); });
+  return { el, update: () => { if (favOpen) positionFavSel(); refresh(); } };
 }

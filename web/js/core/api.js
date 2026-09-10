@@ -113,6 +113,8 @@ export const StudioAPI = {
   favorites: () => getJson("/mrnext/favorites"),
   favoriteAdd: (items) => postJson("/mrnext/favorites/add", { items }),
   favoriteRemove: (x) => postJson("/mrnext/favorites/remove", Array.isArray(x) ? { items: x } : x),
+  // 改收藏名（可选连磁盘文件一起改名）。body: {rel|id, name, rename_file?}
+  favoriteRename: (payload) => postJson("/mrnext/favorites/rename", payload),
   adaptLongdoc: (text) => postJson("/mrnext/studio/adapt_longdoc", { text }),
   sanitizeWorkflow: (graph) => postJson("/mrnext/studio/sanitize_workflow", { graph }),
   exportStoryboard: (script, prefix = "") => rawText("/mrnext/studio/export", { script, prefix }),

@@ -106,3 +106,67 @@ def remove_items(ids=None, keys=None):
     if removed and not _save(keep):
         raise RuntimeError("收藏库持久化失败")
     return {"removed": removed, "total": len(keep)}
+
+
+def rename_items(ids=None, rel=None, name="", new_rel=None):
+    """改收藏条目的名字（同一个文件的条目一起改）。
+
+    ids：按条目 id 定位；rel：按文件定位（同一 rel 可能被多个分类收藏 → 全改）。
+    new_rel：文件已改名时一并把 rel 换掉，避免收藏库指向不存在的旧路径。
+    """
+    items = _load()
+    id_set = {str(x) for x in (ids or []) if x}
+    rel0 = str(rel or "").strip().replace("\\", "/")
+    nm = str(name or "").strip()
+    nr = str(new_rel or "").strip().replace("\\", "/")
+    if not id_set and not rel0:
+        return {"error": "需要 id 或 rel 才能定位要改名的收藏", "updated": 0}
+    hit = 0
+    for i in items:
+        cur_rel = str(i.get("rel") or "")
+        matched = (str(i.get("id") or "") in id_set) if id_set else False
+        if not matched and rel0 and cur_rel == rel0:
+            matched = True
+        if not matched:
+            continue
+        if nm:
+            i["name"] = nm
+        if nr:
+            i["rel"] = nr
+        hit += 1
+    if hit and not _save(items):
+        raise RuntimeError("收藏库持久化失败")
+    return {"updated": hit, "name": nm, "rel": nr or rel0, "total": len(items)}
+
+
+def replace_all(items):
+    """整体覆盖写回（供外部改名流程同步 rel / name 时使用）。"""
+    if not _save(list(items or [])):
+        raise RuntimeError("收藏库持久化失败")
+    return {"total": len(items or [])}
+
+
+def sync_renamed_file(old_rel, new_rel, new_stem):
+    """磁盘文件改名后：把收藏库里指向旧路径的条目改到新路径。
+
+    条目名字原本就等于旧文件名主名时（生成设定图/流水线自动命名的常见情形），
+    名字也一起改成新主名，保持「收藏名 = 文件名」的一致。
+    """
+    items = _load()
+    old_rel = str(old_rel or "").strip().replace("\\", "/")
+    new_rel = str(new_rel or "").strip().replace("\\", "/")
+    if not old_rel or not new_rel or old_rel == new_rel:
+        return {"updated": 0}
+    old_stem = os.path.splitext(os.path.basename(old_rel))[0]
+    hit = 0
+    for i in items:
+        if str(i.get("rel") or "") != old_rel:
+            continue
+        i["rel"] = new_rel
+        if str(i.get("name") or "") == old_stem:
+            i["name"] = str(new_stem or "").strip() or i["name"]
+        hit += 1
+    if hit and not _save(items):
+        raise RuntimeError("收藏库持久化失败")
+    return {"updated": hit}
+

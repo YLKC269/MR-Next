@@ -107,9 +107,20 @@ export function sanitizeState(state) {
     if (typeof out[k] === "string") out[k] = stripVirtualRefs(out[k]);
   });
   if (Array.isArray(out.shots)) out.shots = out.shots.map(sanitizeShot);
-  // refMap：丢掉 rel 不可用的条目（虚拟引用 / @ 开头 / 空），避免"幽灵素材"再次出现
+  // refMap：丢掉 rel 不可用的条目（虚拟引用 / @ 开头 / 空），避免"幽灵素材"再次出现。
+  // ⚠ refMap 有两种形态，必须都处理：
+  //   ① 平面 [{name,rel,kind,category}]          —— 早期/单镜
+  //   ② 每镜一组 [[{name,rel}], [{name,rel}]]    —— split 返回的 perShot（主形态）
+  // 老实现只按 ① 过滤，会把 ② 的每一"组"当成一个条目去读 m.rel（数组没有 rel）→
+  // 整个 refMap 被清空。后果：每次 store.set 之后"切分到导演台"的素材引用全丢，
+  // 时间线再也无法从 refMap 自动导入本镜素材（PR 里表现为「九宫格空着」）。
+  const _cleanEntry = (x) => (!x || typeof x !== "object" || isUsableRel(x.rel) ? x : null);
   if (Array.isArray(out.refMap)) {
-    out.refMap = out.refMap.filter((m) => !m || typeof m !== "object" || isUsableRel(m.rel));
+    out.refMap = out.refMap
+      .map((m) => (Array.isArray(m)
+        ? m.map(_cleanEntry).filter((x) => x !== null)
+        : _cleanEntry(m)))
+      .filter((m) => m !== null);
   }
   return out;
 }

@@ -274,38 +274,34 @@ def _safe_asset_name(name, fallback="asset"):
     return s or fallback
 
 
-async def studio_rename(req):
-    """POST /mrnext/studio/rename —— 把素材重命名为「剧本名字」，返回新 rel。
+def _rename_input_file(rel, name):
+    """把 input 目录里的素材文件重命名（保留扩展名）。返回 dict（含 error 时表示失败）。
 
-    body: {rel: "mrboard_next/1788948454574_xxx.png", name: "林晚"}
-    - 保留原扩展名，只改主名；
     - 目标名清洗成合法文件名（去 Windows 非法字符）；
     - 已存在同名文件则自动加 _2 / _3，绝不覆盖既有素材；
-    - 源/目标都强制限制在 input 目录内（防目录穿越）。
+    - 源/目标都强制限制在 input 目录内（防目录穿越）；
+    - 幂等：文件已经是目标名字 → 直接返回原名（避免被加 _2/_3 后缀）。
     """
-    body = await req.json()
-    rel = str(body.get("rel") or "").strip().replace("\\", "/")
-    name = str(body.get("name") or "").strip()
+    rel = str(rel or "").strip().replace("\\", "/")
+    name = str(name or "").strip()
     if not rel:
-        return _json({"error": "缺少 rel"}, status=400)
+        return {"error": "缺少 rel"}
     base = _input_base()
     try:
         src = _safe_join(base, rel)
     except (ValueError, OSError) as exc:
-        return _json({"error": f"路径不合法: {exc}"}, status=400)
+        return {"error": f"路径不合法: {exc}"}
     if not os.path.isfile(src):
-        return _json({"error": "文件不存在: " + rel}, status=404)
+        return {"error": "文件不存在: " + rel}
     if not name:
-        return _json({"error": "缺少目标名字 name"}, status=400)
+        return {"error": "缺少目标名字 name"}
     ext = os.path.splitext(src)[1].lower() or ".png"
     folder = os.path.dirname(rel)
     stem = _safe_asset_name(name)
-    # 幂等短路：文件已经是目标名字（重跑流水线/重复点生成）→ 直接返回原名，
-    # 否则会被判成"重名"再加 _2/_3 后缀，把好好的「林晚.png」改成「林晚_3.png」。
     cur_stem = os.path.splitext(os.path.basename(src))[0]
     if cur_stem == stem:
-        return _json({"ok": True, "rel": rel, "filename": os.path.basename(src),
-                      "name": cur_stem, "renamed": False})
+        return {"ok": True, "rel": rel, "filename": os.path.basename(src),
+                "name": cur_stem, "renamed": False}
 
     def _uniq(stem0):
         cand, i = stem0, 1
@@ -324,14 +320,92 @@ async def studio_rename(req):
     try:
         dst = _safe_join(base, dst_rel)
         if os.path.abspath(src) == os.path.abspath(dst):
-            return _json({"ok": True, "rel": rel, "filename": os.path.basename(src),
-                          "name": cand, "renamed": False})
+            return {"ok": True, "rel": rel, "filename": os.path.basename(src),
+                    "name": cand, "renamed": False}
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         os.rename(src, dst)
     except Exception as exc:  # noqa: BLE001
-        return _json({"error": f"改名失败: {exc}"}, status=500)
-    return _json({"ok": True, "rel": dst_rel, "filename": os.path.basename(dst),
-                  "name": cand, "renamed": True, "from": rel})
+        return {"error": f"改名失败: {exc}"}
+    return {"ok": True, "rel": dst_rel, "filename": os.path.basename(dst),
+            "name": cand, "renamed": True, "from": rel}
+
+
+async def studio_rename(req):
+    """POST /mrnext/studio/rename —— 把素材重命名为「剧本名字」，返回新 rel。
+
+    body: {rel: "mrboard_next/1788948454574_xxx.png", name: "林晚"}
+    改名成功后**同步收藏库里指向该文件的条目**，否则收藏库会指向不存在的旧路径
+    （面板上表现为"缩略图破了 / 名字还在但打不开"）。
+    """
+    body = await req.json()
+    res = _rename_input_file(body.get("rel"), body.get("name"))
+    if res.get("error"):
+        return _json({"error": res["error"]}, status=400 if "路径" in res["error"] or "缺少" in res["error"] else 404)
+    if res.get("renamed"):
+        try:
+            favmod.sync_renamed_file(res.get("from"), res["rel"], res.get("name"))
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger("ComfyUI-MRBoard.favorites").warning("[MRBoardNext] 同步收藏库改动失败: %s", exc)
+        # 旧路径的缩略图缓存作废（新老 rel 都清一次，避免面板还挂着旧图）
+        _purge_thumb_cache([res.get("from"), res.get("rel")])
+    return _json(res)
+
+
+async def favorites_rename(req):
+    """POST /mrnext/favorites/rename —— 改收藏名（可选连磁盘文件一起改）。
+
+    body: {id?, rel?, name, rename_file?}
+    只传 name 时只改"语义名字"；rename_file 显式 true / 未传且文件名主名 == 旧名时，
+    连磁盘文件一起重命名（生成设定图/流水线本来就按语义名存盘 → 默认保持一致）。
+    """
+    body = await req.json()
+    name = str(body.get("name") or "").strip()
+    if not name:
+        return _json({"error": "缺少新名字 name"}, status=400)
+    rel = str(body.get("rel") or "").strip().replace("\\", "/")
+    fid = str(body.get("id") or "").strip()
+    if not rel and fid:
+        for it in favmod.list_items():
+            if str(it.get("id") or "") == fid:
+                rel = str(it.get("rel") or "")
+                break
+    if not rel:
+        return _json({"error": "需要 rel 或 id 才能定位收藏条目"}, status=400)
+
+    # 旧名（用于判断"文件名是否就是按语义名存的"）
+    old_name = ""
+    for it in favmod.list_items():
+        if str(it.get("rel") or "") == rel:
+            old_name = str(it.get("name") or "")
+            break
+
+    want_file = body.get("rename_file")
+    if want_file is None:
+        stem = os.path.splitext(os.path.basename(rel))[0]
+        want_file = bool(old_name) and stem == old_name
+
+    new_rel, renamed_file = rel, False
+    if want_file:
+        res = _rename_input_file(rel, name)
+        if res.get("error"):
+            return _json({"error": res["error"]}, status=400)
+        new_rel = res.get("rel") or rel
+        renamed_file = bool(res.get("renamed"))
+
+    try:
+        upd = favmod.rename_items(ids=[fid] if fid else None, rel=rel, name=name, new_rel=new_rel if new_rel != rel else None)
+    except RuntimeError as exc:
+        return _json({"error": str(exc)}, status=500)
+    if new_rel != rel:
+        _purge_thumb_cache([rel, new_rel])
+    return _json({
+        "ok": True,
+        "name": name,
+        "rel": new_rel,
+        "oldRel": rel,
+        "renamedFile": renamed_file,
+        "updated": int(upd.get("updated") or 0),
+    })
 
 
 async def studio_split(req):
@@ -3223,6 +3297,7 @@ ROUTES = [
     ("GET", "/mrnext/favorites", favorites_list),
     ("POST", "/mrnext/favorites/add", favorites_add),
     ("POST", "/mrnext/favorites/remove", favorites_remove),
+    ("POST", "/mrnext/favorites/rename", favorites_rename),
     ("POST", "/mrnext/studio/adapt_longdoc", longdoc_adapt),
     ("POST", "/mrnext/studio/sanitize_workflow", studio_sanitize),
     ("POST", "/mrnext/studio/export", studio_export),

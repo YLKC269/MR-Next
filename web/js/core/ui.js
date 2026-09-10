@@ -266,3 +266,44 @@ export async function pickAssetFolder(ctx, title) {
   // 拿不到 input base（旧后端）：退化为取末级目录名
   return { folder: pn.split("\\").filter(Boolean).pop() || "" };
 }
+
+/* 就地改名：把显示名字的元素（如素材卡的 .mn / 收藏卡的 .mn）临时换成输入框。
+ *   Enter / 失焦 = 提交；Esc = 取消。onCommit(newName) 由调用方负责调后端 + 刷新。
+ * 返回 true 表示已进入编辑态（同一元素同时只允许一个编辑框）。
+ * 注意：输入框内 stopPropagation —— 否则卡片自身的 pointerdown 拖拽换位、
+ * 画布层/全局快捷键（空格、Delete、Ctrl+Z）会在打字时被触发。 */
+export function inlineRename(labelEl, initial, onCommit) {
+  if (!labelEl || labelEl.__mxEditing) return false;
+  labelEl.__mxEditing = true;
+  const prevText = labelEl.textContent;
+  const start = String(initial != null ? initial : prevText || "");
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.value = start;
+  inp.spellcheck = false;
+  inp.setAttribute("style",
+    "width:100%;box-sizing:border-box;font:inherit;font-size:12px;line-height:1.35;padding:2px 5px;" +
+    "border-radius:6px;border:1px solid var(--gold,#ffcf6b);background:#0b1526;color:#eaf1fb;outline:none;");
+  labelEl.textContent = "";
+  labelEl.appendChild(inp);
+  let done = false;
+  const finish = (ok) => {
+    if (done) return;
+    done = true;
+    labelEl.__mxEditing = false;
+    const v = inp.value.trim();
+    labelEl.textContent = prevText;   // 先还原；成功后调用方会重渲染整块
+    if (ok && v && v !== start) { try { onCommit(v); } catch (_) {} }
+  };
+  inp.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  inp.addEventListener("click", (e) => e.stopPropagation());
+  inp.addEventListener("pointerdown", (e) => e.stopPropagation());
+  inp.addEventListener("dblclick", (e) => e.stopPropagation());
+  inp.addEventListener("blur", () => finish(true));
+  setTimeout(() => { try { inp.focus(); inp.select(); } catch (_) {} }, 0);
+  return true;
+}

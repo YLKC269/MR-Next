@@ -15,8 +15,115 @@ let refs = {}; // name -> rel（公共前缀权威绑定）
 let tagBindings = {}; // "<Picture N>" / "<Subject N>" / "<Audio N>" / "<Video N>" → rel（公共前缀手动指定图片绑定）
 const subs = new Set();
 
-// ---- 素材库自定义顺序（拖拽换位）—— 与 assets.js 共用同一份 localStorage 约定 ----
+// 可选：绑定全局 store（app.js 挂载时调用一次）。绑定后改名会自动重映射
+// store.refMap 里每镜素材的 rel/name —— 否则素材改名后，时间线里那一镜的
+// 参考图标记还指着旧路径（缩略图裂掉、出片时取不到图）。
+let _store = null;
+export function bindAssetStore(store) { _store = store; }
+
+// 把 store.refMap[i] = [{name, rel, kind, category}] 里的旧 rel/name 换成新的
+function remapStoreRefMap(oldRel, newRel, oldName, newName) {
+  if (!_store) return 0;
+  let st = null;
+  try { st = _store.get(); } catch (_) { return 0; }
+  const rm = st && st.refMap;
+  if (!Array.isArray(rm)) return 0;
+  let changed = 0;
+  const next = rm.map((arr) => {
+    if (!Array.isArray(arr)) return arr;
+    return arr.map((it) => {
+      if (!it || typeof it !== "object") return it;
+      let o = it;
+      if (oldRel && newRel && it.rel === oldRel) { o = { ...o, rel: newRel }; changed++; }
+      if (oldName && newName && it.name === oldName) { o = { ...o, name: newName }; changed++; }
+      return o;
+    });
+  });
+  if (changed) { try { _store.set({ refMap: next }); } catch (_) {} }
+  return changed;
+}
+
+// 把"作为素材名出现"的旧名替换成新名。
+// 关键：先保护「包含旧名的其它素材名」（如旧名「林晚」、另有素材「林晚B」）——
+// 不保护的话 林晚 → 林晚A 会把「林晚B」改成「林晚AB」。
+function replaceAssetName(text, oldName, newName, guardNames) {
+  let t = String(text == null ? "" : text);
+  if (!t || !oldName || !newName || oldName === newName) return t;
+  const rx = (s) => new RegExp(String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+  const guards = [];
+  for (const n of (guardNames || [])) {
+    if (!n || n === oldName || !String(n).includes(oldName)) continue;
+    const key = "\u0001MXG" + guards.length + "\u0001";
+    t = t.replace(rx(n), key);
+    guards.push([key, n]);
+  }
+  t = t.replace(rx(oldName), newName);
+  for (const [k, n] of guards) t = t.split(k).join(n);   // 还原被保护的其它名字
+  return t;
+}
+
+// store 里的正文（剧本 / 公共前缀 / 每镜正文）同步把旧名改成新名 ——
+// 否则改名后正文里的"标记"会因为找不到同名素材而直接消失（用户会以为功能坏了）。
+function remapStoreNames(oldName, newName) {
+  if (!_store || !oldName || !newName || oldName === newName) return 0;
+  let st = null;
+  try { st = _store.get(); } catch (_) { return 0; }
+  const guard = [];
+  for (const f of (favs || [])) if (f && f.name && f.name !== oldName) guard.push(f.name);
+  for (const f of (files || [])) {
+    const s = String((f && f.name) || "").replace(/\.[^.]+$/, "");
+    if (s && s !== oldName) guard.push(s);
+  }
+  let hits = 0;
+  const fix = (v) => {
+    const out = replaceAssetName(v, oldName, newName, guard);
+    if (out !== (v == null ? "" : v)) hits++;
+    return out;
+  };
+  const patch = {};
+  const s1 = fix(st.script || "");
+  if (s1 !== (st.script || "")) patch.script = s1;
+  const p1 = fix(st.prefix || "");
+  if (p1 !== (st.prefix || "")) patch.prefix = p1;
+  if (Array.isArray(st.shots)) {
+    let ch = false;
+    const shots = st.shots.map((sh) => {
+      if (!sh || typeof sh !== "object") return sh;
+      let o = sh;
+      const t2 = fix(sh.text || "");
+      if (t2 !== (sh.text || "")) { o = { ...o, text: t2 }; ch = true; }
+      const p2 = fix(o.prompt || "");
+      if (p2 !== (o.prompt || "")) { o = { ...o, prompt: p2 }; ch = true; }
+      return o;
+    });
+    if (ch) patch.shots = shots;
+  }
+  if (Object.keys(patch).length) { try { _store.set(patch); } catch (_) {} }
+  return hits;
+}
+
+// 素材库自定义顺序（拖拽换位）—— 与 assets.js 共用同一份 localStorage 约定
 const ORDER_LS_PREFIX = "mrnext.assets.order.v1."; // + `${folder}::${kind}`
+
+// 改名后：把 localStorage 里保存的自定义顺序里的旧文件名替换成新文件名
+// （不替换的话，重命名过的素材会掉到列表末尾，用户会觉得"顺序乱了"）
+function remapOrderNames(oldName, newName) {
+  if (!oldName || !newName || oldName === newName) return 0;
+  let n = 0;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || k.indexOf(ORDER_LS_PREFIX) !== 0) continue;
+      let arr = [];
+      try { arr = JSON.parse(localStorage.getItem(k) || "[]"); } catch (_) { continue; }
+      if (!Array.isArray(arr) || arr.indexOf(oldName) < 0) continue;
+      const next = arr.map((x) => (x === oldName ? newName : x));
+      localStorage.setItem(k, JSON.stringify(next));
+      n++;
+    }
+  } catch (_) {}
+  return n;
+}
 
 function loadOrder(folder, kind) {
   try {
@@ -144,6 +251,44 @@ export const assetRegistry = {
   // 素材库自定义顺序（供 assets.js 拖拽换位复用同一套逻辑）
   applyCustomOrder,
   persistOrderFromFiles,
+  // ---- 改名后的全局重映射（改名面板调用一次，所有面板的标记/预览随之刷新）----
+  //   ① refs / tagBindings 里指向旧 rel 的绑定改到新 rel（否则 token 会取不到图）
+  //   ② localStorage 自定义顺序里的旧文件名改到新文件名
+  //   ③ 通知所有订阅者（各面板 mention editor 重渲染 token、网格重扫）
+  remapAssets({ oldRel, newRel, oldName, newName } = {}) {
+    const oR = String(oldRel || "").trim();
+    const nR = String(newRel || "").trim();
+    const oN = String(oldName || "").trim();
+    const nN = String(newName || "").trim();
+    let touched = 0;
+    // ① 引用绑定 / 标签绑定里指向旧 rel 的改到新 rel（token 才能取到新文件）
+    if (oR && nR && oR !== nR) {
+      for (const k of Object.keys(refs)) {
+        if (refs[k] === oR) { refs[k] = nR; touched++; }
+      }
+      for (const k of Object.keys(tagBindings)) {
+        if (tagBindings[k] === oR) { tagBindings[k] = nR; touched++; }
+      }
+    }
+    // ② 引用绑定的 key 换名（正文已被改写成新名，就得以新名为键才能命中）
+    if (oN && nN && oN !== nN && refs[oN] != null) {
+      refs[nN] = refs[oN];
+      delete refs[oN];
+      touched++;
+    }
+    // ③ localStorage 自定义顺序里的旧文件名换新（否则素材会掉到列表末尾）
+    touched += remapOrderNames(oN, nN);
+    // ④ store.refMap（每镜素材引用）换 rel/name
+    touched += remapStoreRefMap(oR, nR, oN, nN);
+    // ⑤ store 正文（剧本 / 公共前缀 / 每镜正文）里的旧名换新名 → 标记继续显示、缩略图跟着换
+    touched += remapStoreNames(oN, nN);
+    if (touched) subs.forEach((fn) => { try { fn(); } catch (_) {} });
+    return touched;
+  },
+  // 改名/收藏/删除后统一走这一条：重读后端最新资产 → 广播给所有订阅面板
+  async broadcastChange(f) {
+    return refresh(f);
+  },
   refresh,
   subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
 };

@@ -374,6 +374,10 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 .mcard .abtn:hover::before { animation: mxEnergyFlow .6s var(--ease) both; }
 .mcard .abtn:hover { background: linear-gradient(180deg, #f5ca57, #e0a83a); color: #3a2503; transform: scale(1.08); }
 .mcard .abtn.del { color: #ff9d9d; } .mcard .abtn.del:hover { background: #c44; color: #fff; }
+.mcard .abtn.ren { color: #b7e4ff; } .mcard .abtn.ren:hover { background: linear-gradient(180deg,#8fd4ff,#3f9ed6); color: #06202f; }
+/* 改名中的输入框：占满卡片名字那一行，金色描边提示"正在编辑" */
+.mcard .mn input { display: block; }
+.mcard .mn.editing { padding: 1px 2px; }
 .mcard .ck { position: absolute; bottom: 5px; right: 5px; width: 15px; height: 15px; cursor: pointer; opacity: 0; transition: opacity .18s var(--ease); }
 .mcard:hover .ck { opacity: 1; }
 .mcard.chk { outline: 2px solid #ff6b6b; }

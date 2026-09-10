@@ -1,6 +1,7 @@
 // panels/editor.js — 剪辑（剪映式）：素材栏(多选删除) + 预览 + V1/V2 视频轨 + A1 音频轨 → 合成
 import { h, clear } from "../core/dom.js";
 import { relToViewUrl, editorThumbUrl } from "../core/api.js";
+import { assetRegistry } from "../core/assets.js";
 
 // 面板可能被重建（切换导航），文档级监听器必须换新前解绑旧的，否则重复触发/泄漏
 let _prevKeys = null;
@@ -928,6 +929,8 @@ export function createEditorPanel(ctx) {
   tabSel.onchange = () => { tab = tabSel.value; renderMats(); };
   refreshMaterials();
   loadMusic();
+  // 素材库/收藏库改名（或删素材）→ 剪辑素材区实时重扫，缩略图与文件名跟着变（不用切走再回来）
+  assetRegistry.subscribe(() => { if (el.isConnected) refreshMaterials(); });
 
   // ---- 播放时播放头实时跟随（rAF 节流，只改 left，不触发重排）----
   const _followHead = rafThrottle(() => {

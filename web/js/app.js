@@ -16,6 +16,7 @@ import { createEditorPanel } from "./panels/editor.js";
 import { createToolsPanel } from "./panels/tools.js";
 import { setupEnergyRipple } from "./core/ui.js";
 import { stripVirtualRefs } from "./core/purify.js";
+import { bindAssetStore } from "./core/assets.js";
 
 const PANELS = [
   { name: "script", icon: "📜", label: "剧本", sub: "输入 / 拆分 / 定义 / 适配 / 设定图", accent: "#f0937a", make: createScriptPanel },
@@ -65,6 +66,9 @@ export function mountApp(shadow, node) {
     loraFolder: "",        // 自定义 LoRA 文件夹（空 = 后端默认 models/loras）
     ..._loadStore(),
   });
+  // 把 store 交给资产注册表：素材/收藏改名时自动重映射 store.refMap（每镜素材引用），
+  // 这样时间线/分镜里的标记与预览会跟着改名实时刷新。
+  bindAssetStore(store);
   // ---- 一次性数据清洗：删除正文里的机器文件名 token（历史 @ 插入的 1788963615883_82a78583_00001_.png 等）----
   // 匹配「≥10位数字_十六进制哈希_序号_?.扩展名」——特异性足够高，不会误删正常文本。
   const _MACHINE_FILE_RE = /\s*\d{10,}_[0-9a-fA-F]{6,}_\d+_?\.(?:png|jpg|jpeg|webp|gif|bmp|mp4|mov|webm|mkv|wav|mp3|flac|ogg|m4a)/g;
