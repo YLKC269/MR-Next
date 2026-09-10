@@ -168,8 +168,7 @@ export function createAssetsPanel(ctx) {
     else favSel.style.display = "none";
   };
 
-  const refresh = async () => {
-    clear(grid);
+  const refreshInner = async () => {
     const folder = folderIn.value.trim();
     ctx.store.patch("folder", folder);
     try {
@@ -178,11 +177,21 @@ export function createAssetsPanel(ctx) {
       // （这样 <Picture N> 之类的索引会跟着拖拽换位变化，对齐到用户实际想要的引用顺序）
       const allRaw = res.files || [];
       files = applyCustomOrder(allRaw, folder, curKind);
+      // 兜底去重：同一 rel 只留一条（否则网格出现两张一样的卡、<Picture N> 序号还会重复）
+      const _seenRel = new Set();
+      files = files.filter((f) => {
+        const r = (folder ? folder + "/" : "") + ((f && f.name) || "");
+        if (!f || !f.name || _seenRel.has(r)) return false;
+        _seenRel.add(r);
+        return true;
+      });
       const prefixMap = { image: "Picture", audio: "Audio", video: "Video" };
       // 同 kind 内：1-based 顺序索引
       const kindCounters = { image: 0, audio: 0, video: 0 };
       files.forEach((f) => { if (f && f.kind && prefixMap[f.kind] != null) { kindCounters[f.kind] += 1; f.index = kindCounters[f.kind]; } });
       statusLbl.textContent = `${files.length} 个文件${curKind !== "all" ? `（${curKind}）` : ""} · ${folder || "input 根"}`;
+      // 统一在这里清空：之前是函数开头清，两个并发刷新各自清一次、再各自 append → 网格里出现两遍
+      clear(grid);
       if (!files.length) {
         grid.appendChild(h("div", { class: "empty" }, "该分类暂无素材 —— 上传 / 原生导入 或切换分类"));
         return;
@@ -258,6 +267,20 @@ export function createAssetsPanel(ctx) {
         grid.appendChild(card);
       }
     } catch (e) { ctx.toast("列举失败: " + e.message, true); }
+  };
+  // 并发守卫：assetRegistry.refresh() 会通知订阅者刷一次，而 4s 轮询 tick 的 onTick 又刷一次 →
+  // 两个异步渲染各清一次、再各追加一遍 → 网格里同一批素材出现两遍（两个 <Picture 1>）。
+  // 正在刷时只记一个"稍后再刷"，本轮结束后补刷一次（不丢刷新、也不重复渲染）。
+  let _refreshing = false, _refAgain = false;
+  const refresh = async () => {
+    if (_refreshing) { _refAgain = true; return; }
+    _refreshing = true;
+    try {
+      await refreshInner();
+    } finally {
+      _refreshing = false;
+      if (_refAgain) { _refAgain = false; refresh(); }
+    }
   };
 
   // ✎ 重命名素材文件（磁盘改名）→ 收藏库同步 + 全局注册表重映射 + 广播所有面板刷新标记/预览
