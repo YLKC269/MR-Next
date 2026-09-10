@@ -634,9 +634,20 @@ _SEG_RE = re.compile(
 # H3 官方模板的分镜边界：
 #   【分镜N】/ 分镜N：/ 第N镜 / 镜头N / Shot N / S05（含「S05 / 5s」时长标注行）
 #   Markdown 标准镜头信息表的表格行：| **S02 / 6s** | ...（竖线 + 粗体包裹）
+# ---- 「时间码镜头头」格式常量（被下面的切分/剥离正则共用，必须先定义）----
+#   **【00:00 – 00:08】镜头一｜全景→中景** / 【00:00-00:08】镜头1 / 00:00–00:08 镜头一
+TC_ONE_PAT = r"[0-9]{1,2}\s*[:：]\s*[0-9]{1,2}(?:\s*[:：]\s*[0-9]{1,2})?"
+TC_RANGE_PAT = r"(?:" + TC_ONE_PAT + r")\s*(?:[-–—~～]|至|到)\s*(?:" + TC_ONE_PAT + r")"
+CN_NUM_RUN = r"[一二三四五六七八九十百]{1,3}"
+# 镜号后必须是"标记边界"，否则「镜头十分宏大」这种正文会被误切
+SHOT_NO_BOUND = r"(?=[\s｜|·:：、.．*]|$)"
+_TC_SPLIT_RE = re.compile(r"(" + TC_ONE_PAT + r")\s*(?:[-–—~～]|至|到)\s*(" + TC_ONE_PAT + r")")
+
 _H3_SPLIT_RE = re.compile(
-    r"(?=^\s*(?:\|?\s*\*{0,2})?[【\[]?\s*(?:分镜|镜头|[Ss](?:hot)?)\s*\d+\s*[】\]]?"
-    r"|^\s*第\s*\d+\s*镜\b)", re.M)
+    r"(?=^[ \t]*(?:\|?[ \t]*\*{0,2})?(?:[【\[]\s*" + TC_RANGE_PAT + r"\s*[】\]]|" + TC_RANGE_PAT + r")"
+    r"|^[ \t]*(?:\|?[ \t]*\*{0,2})?[【\[]?\s*(?:分镜|镜头|[Ss](?:hot)?)\s*(?:\d{1,3}|" + CN_NUM_RUN + r")\s*[】\]]?"
+    r"|^[ \t]*第\s*(?:\d{1,3}|" + CN_NUM_RUN + r")\s*镜\b)", re.M)
+
 _H3_STRIP_RE = re.compile(
     r"^\s*(?:\|?\s*\*{0,2})?[【\[]?\s*(?:分镜|镜头|[Ss](?:hot)?)\s*\d+\s*[】\]]?"
     r"(?:\s*\*{0,2})?"
@@ -644,14 +655,65 @@ _H3_STRIP_RE = re.compile(
     r"(?:\s*\|)?\s*[:：、.．]?\s*"
     r"|^\s*第\s*\d+\s*镜\s*[:：]?\s*")
 _H3_LINE_RE = re.compile(
-    r"^\s*(?:\|?\s*\*{0,2})?[【\[]?\s*(?:分镜|镜头|[Ss](?:shot)?)\s*\d+\s*[】\]]?"
-    r"|^\s*第\s*\d+\s*镜\b")
+    r"^[ \t]*(?:\|?[ \t]*\*{0,2})?(?:[【\[]\s*" + TC_RANGE_PAT + r"\s*[】\]]|" + TC_RANGE_PAT + r")"
+    r"|^[ \t]*(?:\|?[ \t]*\*{0,2})?[【\[]?\s*(?:分镜|镜头|[Ss](?:hot)?)\s*(?:\d{1,3}|" + CN_NUM_RUN + r")\s*[】\]]?"
+    r"|^[ \t]*第\s*(?:\d{1,3}|" + CN_NUM_RUN + r")\s*镜\b")
 _H3_DUR_RE = re.compile(
     r"^\s*(?:\|?\s*\*{0,2})?[【\[]?\s*(?:分镜|镜头|[Ss](?:shot)?)\s*\d+\s*[】\]]?"
     r"\s*\*{0,2}\s*[/／]\s*(\d+(?:\.\d+)?)\s*[sS秒]", re.M)
 _H3_TABLE_DIVIDER_RE = re.compile(r"^[\s|:\-*]+$")
 _H3_TABLE_TITLE_RE = re.compile(
     r"^[^\n]*(?:标准镜头信息表|Standard\s+Shot\s+Table)[^\n]*$", re.M | re.I)
+
+
+# ---- 「时间码镜头头」格式（短剧分镜脚本常见写法；用户实报）----
+#   **【00:00 – 00:08】镜头一｜全景→中景**
+#   【00:00-00:08】镜头1  /  [00:00 – 00:08] 镜头一  /  00:00–00:08 镜头一 （时间码可无括号）
+#   时长直接取「结束 − 开始」→ marker_durs（优先于行内「N秒」）
+
+def _tc_sec(t):
+    """时间码 → 秒（00:08=8 / 01:02:03=3723）。"""
+    nums = []
+    for x in re.split(r"[:：]", str(t or "")):
+        x = x.strip()
+        if x.isdigit():
+            nums.append(int(x))
+    if len(nums) == 3:
+        return nums[0] * 3600 + nums[1] * 60 + nums[2]
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    return nums[0] if nums else None
+
+
+def _tc_range_dur(text):
+    """时间码区间 → 时长（结束 − 开始，秒）。找不到/非法返回 None。"""
+    m = _TC_SPLIT_RE.search(text or "")
+    if not m:
+        return None
+    a, b = _tc_sec(m.group(1)), _tc_sec(m.group(2))
+    if a is None or b is None or b <= a:
+        return None
+    return float(b - a)
+
+
+# 时间码镜头头（用于剥离）：【时间码】[镜头N][｜景别]
+_H3_TC_STRIP_RE = re.compile(
+    r"^[ \t]*(?:\|?[ \t]*\*{0,2})?"
+    r"(?:[【\[]\s*" + TC_RANGE_PAT + r"\s*[】\]]|" + TC_RANGE_PAT + r")"
+    r"[ \t]*\*{0,2}[ \t]*"
+    r"(?:(?:镜\s*头|镜|[Ss]hot)\s*(?:\d{1,3}|" + CN_NUM_RUN + r")\s*" + SHOT_NO_BOUND + r")?"
+    r"(?:[｜|·][^\n*]{0,40})?"
+    r"[ \t]*\*{0,2}[ \t]*", re.M)
+# 中文数字镜号（无时间码）：镜头一｜全景 / 第一镜：近景
+_H3_CN_STRIP_RE = re.compile(
+    r"^[ \t]*(?:\|?[ \t]*\*{0,2})?(?:第\s*)?(?:镜\s*头|镜|[Ss]hot)\s*"
+    r"(?:\d{1,3}|" + CN_NUM_RUN + r")\s*" + SHOT_NO_BOUND +
+    r"(?:[｜|·][^\n*]{0,40})?[ \t]*\*{0,2}[ \t]*", re.M)
+# 片尾「字幕卡」标签行 → 只删标签、保留卡文字
+# （H3 规则里双引号文本 = 画内字幕，正好就是字幕卡语义）
+_CARD_LABEL_RE = re.compile(
+    r"^[ \t]*\*{0,2}[【\[（(]?\s*(?:字幕卡|片尾字幕|结束卡|标题卡|定格卡|片尾卡)\s*[】\]）)]?\s*\*{0,2}[ \t]*$",
+    re.M)
 
 
 def _h3_cut_after_table_title(text):
@@ -685,14 +747,21 @@ def _h3_strip_table_noise(seg):
 
 
 def _h3_parse_marker_durations(bodies):
-    """解析每镜标记行里的时长标注（「S05 / 5s」→ 5.0 秒），返回与 bodies 等长列表。"""
+    """解析每镜标记行里的时长标注（「S05 / 5s」→ 5.0 秒；「【00:00 – 00:08】」→ 8.0），
+    返回与 bodies 等长列表。"""
     out = []
     for b in bodies or ():
-        m = _H3_DUR_RE.search((b or "")[:200])
-        try:
-            out.append(float(m.group(1)) if m else None)
-        except ValueError:
-            out.append(None)
+        head = (b or "")[:200]
+        m = _H3_DUR_RE.search(head)
+        v = None
+        if m:
+            try:
+                v = float(m.group(1))
+            except ValueError:
+                v = None
+        if v is None:
+            v = _tc_range_dur(head)
+        out.append(v)
     return out
 
 # 行内分镜标记（非行首，用于单行退化剧本）。
@@ -809,6 +878,11 @@ def _split_script(script, prefix=None, strip=True):
         if strip:
             # 剥标记（含 H3 表格行 + 时长标注行）；SEG 切分时标记已被消费，此处 sub 无害
             body_text = _H3_STRIP_RE.sub("", b, count=1)
+            # 时间码镜头头 / 中文数字镜号（各自行首最多剥一次）
+            body_text = _H3_TC_STRIP_RE.sub("", body_text, count=1)
+            body_text = _H3_CN_STRIP_RE.sub("", body_text, count=1)
+            # 片尾「字幕卡」标签行 → 去掉标签，保留卡上的字幕文本
+            body_text = _CARD_LABEL_RE.sub("", body_text)
             body_text = re.sub(r"\|\s*$", "", body_text.strip())
         bodies.append(body_text.strip())
         kept_prefixes.append("")  # 占位（trim 模式下填实际裁剪后的前缀）
@@ -1131,7 +1205,7 @@ def _parse_assets_text(text):
                 nm = nm2.group(1).replace("`", "").replace("*", "").strip()
                 j += 1
                 continue
-            dm2 = re.search(r"\*{0,2}(?:特征描述|描述|外观)\*{0,2}\s*[:：]?\s*(.+)", nxt, re.IGNORECASE)
+            dm2 = re.match(r"^\s*\*{0,2}(?:特征描述|描述|外观)\*{0,2}\s*[:：]?\s*(.+)", nxt, re.IGNORECASE)
             if dm2:
                 desc = dm2.group(1).replace("`", "").replace("*", "").strip().rstrip("。.")
                 j += 1
@@ -1213,7 +1287,9 @@ def _parse_assets_text(text):
                     continue
                 if nxt.startswith(("|", "#", "---")):
                     break
-                sm = re.search(r"\*{0,2}(?:材质|光影|背景|色彩|风格|色调)\*{0,2}\s*[:：]?\s*(.+)", nxt, re.IGNORECASE)
+                # ⚠ 必须锚定行首 + 冒号：以前用 search，风格正文里只要出现「色调」两字
+                # 就会从中间截断（「明亮暖色调，柔光滤镜…」→ 只剩「，柔光滤镜…」）
+                sm = re.match(r"^\s*\*{0,2}(?:材质|光影|背景|色彩|风格|色调)\*{0,2}\s*[:：]\s*(.+)", nxt, re.IGNORECASE)
                 val = ((sm.group(1) if sm else nxt.lstrip("-*· ")) or "").replace("`", "").replace("*", "").strip().rstrip("。.")
                 if val:
                     style_parts.append(val)

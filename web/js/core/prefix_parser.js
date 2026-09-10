@@ -135,6 +135,9 @@ export function parsePrefixDef(prefix) {
     const line = lines[i];
     const lineNo = i + 1;
     if (!line.trim()) continue;
+    // 纯分隔线（--- / === / ___ / *** / ···）→ 静默跳过：它本来就没内容，
+    // 不算"未识别"（时间码格式剧本常在定义头与分镜之间放一条 ---）
+    if (/^\s*[-=_*~·]{3,}\s*$/.test(line.trim())) continue;
     // 去掉 markdown / 子弹噪声后的"干净行"（`- `、`**`、`#`、反引号）——所有语义正则都用它
     const clean = stripMd(line);
 
