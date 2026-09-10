@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+.DS_Store
+Temp/
+
+# 安装包 zip 一律不进仓库（要分发请放到 GitHub Releases 附件）
+*.zip

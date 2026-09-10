@@ -1,0 +1,101 @@
+{
+  "last_node_id": 1,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "MRBoardStudio",
+      "pos": [
+        200,
+        120
+      ],
+      "size": [
+        1100,
+        860
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "asset_folder",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "asset_folder"
+          }
+        },
+        {
+          "name": "model_name",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "model_name"
+          }
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "seed"
+          }
+        },
+        {
+          "name": "auto_preview",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "auto_preview"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "分镜数据",
+          "type": "STRING",
+          "links": null,
+          "widget": {
+            "name": "分镜数据"
+          }
+        },
+        {
+          "name": "分镜提示词",
+          "type": "STRING",
+          "links": null,
+          "widget": {
+            "name": "分镜提示词"
+          }
+        },
+        {
+          "name": "分镜数",
+          "type": "INT",
+          "links": null,
+          "widget": {
+            "name": "分镜数"
+          }
+        },
+        {
+          "name": "成片视频",
+          "type": "VIDEO",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MRBoardStudio"
+      },
+      "widgets_values": [
+        "mrboard_next",
+        "",
+        0,
+        true
+      ]
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

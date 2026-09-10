@@ -1,0 +1,17 @@
+[project]
+name = "mrboard-next"
+version = "1.9.4"
+description = "MR分镜助手导演台 · Next — 一个节点跑完整条 AI 短剧流水线（剧本→分镜→设定图→逐镜出片→剪辑成片），已内嵌 MiniMax H3 出片引擎"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+  "imageio_ffmpeg",
+  "Pillow",
+  "opencv-python-headless",
+  "scenedetect>=0.6.4,<0.8",
+]
+
+[tool.comfy]
+PublisherId = "ylkc269"
+DisplayName = "MR分镜助手导演台 · Next"
+Icon = ""
