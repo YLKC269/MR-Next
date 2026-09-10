@@ -75,13 +75,9 @@ export function createScriptPanel(ctx) {
   // 资产文件夹切换时刷新素材库
   folderIn.addEventListener("change", () => { loadAssets().then((a) => { ta.rerender && ta.rerender(); prefixTa.rerender && prefixTa.rerender(); }); });
 
-  const splitBtn = h(
-    "button",
-    {
-      class: "btn btn-primary",
-      title: "拆分剧本为分镜 + 自动匹配时长 + 切分到导演台素材引用",
-      onclick: async () => {
-        try {
+  // 拆分逻辑抽成 doSplit：拆分按钮 + 「🎯 对齐引用」（对齐后自动重拆）共用
+  const doSplit = async () => {
+    try {
           // 收集显性标签手动绑定（<Picture N>/<Subject N>/<Audio N>/<Video N> → rel）
           const tagBindings = Object.assign({}, assetRegistry.tagBindings || {});
           // 收集角色名→rel（自动注入用）：直接复用公共前缀解析器（与「生成设定图」同源，
@@ -125,13 +121,94 @@ export function createScriptPanel(ctx) {
           if (missingTotal) msg += ` · ⚠ ${missingTotal} 个素材缺失`;
           ctx.toast(msg);
           ctx.switchTo("shots");
-        } catch (e) {
-          ctx.toast("拆分失败: " + e.message, true);
-        }
-      },
+    } catch (e) {
+      ctx.toast("拆分失败: " + e.message, true);
+    }
+  };
+  const splitBtn = h(
+    "button",
+    {
+      class: "btn btn-primary",
+      title: "拆分剧本为分镜 + 自动匹配时长 + 切分到导演台素材引用",
+      onclick: () => doSplit(),
     },
     "拆分分镜 → 自动时长 → 切分到导演台"
   );
+
+  /* 🎯 对齐引用：把剧本/前缀里的 <Picture N> 改成素材库里的**真实序号**（不改磁盘文件）
+     素材库序号 = 按 kind 编号 + 你拖拽排序后的顺序，所以"改文件名去凑序号"会和自定义排序打架；
+     改引用最简单也最稳：对完再自动重拆一次，格子里的图立刻对上。 */
+  const alignBtn = h("button", {
+    class: "btn",
+    title: "把剧本与公共前缀里的 <Picture N> 改成素材库里的真实序号（自动重拆；不改磁盘文件）",
+    onclick: async () => {
+      try {
+        await loadAssets().catch(() => {});     // 先刷新素材库（序号要最新）
+        const script = ta.value() || "";
+        const prefix = prefixTa.value() || "";
+        const text = script + "\n" + prefix;
+        // ① 期望名字：<Picture N> 名字（S1）：…（生产模板）/ 角色 N - 名字：<Picture K> …（定义头）
+        const expect = {};
+        const put = (tag, nm) => { nm = String(nm || "").trim(); if (nm && !expect[tag]) expect[tag] = nm; };
+        for (const m of text.matchAll(/<\s*Picture\s*(\d+)\s*>\s*([^：:\n（(【\[]{1,24})/g)) put(`<Picture ${m[1]}>`, m[2]);
+        for (const m of text.matchAll(/(?:角色|场景)\s*\d*\s*[-－—–:：]\s*([^：:\n<]{1,24})\s*[:：]\s*<\s*Picture\s*(\d+)\s*>/g)) put(`<Picture ${m[2]}>`, m[1]);
+        const tags = Object.keys(expect);
+        if (!tags.length) {
+          ctx.toast("没找到 <Picture N> 引用（写「本镜出场角色」块，或前缀里写「角色 1 - 名字：<Picture K>」）", true);
+          return;
+        }
+        const remap = {}, miss = [];
+        // 找角色对应的素材（按序号口径 → 素材库真实 index）：
+        //   ① 权威绑定 / 收藏库 / 同名文件（去扩展名）
+        //   ② 文件名**包含**角色名（用户文件常叫「01_云妙衣.png」「云妙衣_三视图.png」）
+        //   ③ 收藏库名字包含
+        const findAsset = (nm) => {
+          const rel = assetRegistry.relOf(nm);
+          const f0 = rel ? (assets || []).find((x) => x.rel === rel) : null;
+          if (f0 && f0.index) return f0;
+          const hit = (assets || []).filter((x) => x.kind === "image"
+            && String(x.name || "").replace(/\.[^.]+$/, "").includes(nm));
+          if (hit.length) return hit[0];
+          const fav = (favs || []).find((x) => String(x.name || "").includes(nm));
+          if (fav && fav.rel) return (assets || []).find((x) => x.rel === fav.rel) || null;
+          return null;
+        };
+        for (const tag of tags) {
+          const nm = expect[tag];
+          const f = findAsset(nm);
+          const oldN = Number((tag.match(/\d+/) || [0])[0]);
+          if (!f || !f.index) { miss.push(nm); continue; }
+          if (f.index !== oldN) remap[oldN] = f.index;
+        }
+        const changed = Object.keys(remap).length;
+        if (!changed) {
+          ctx.toast(`引用已经全部对上${miss.length ? `；${miss.length} 个还没素材（${miss.join("、")}），生成/收藏后再点一次` : ""}`);
+          return;
+        }
+        // ② 两段式替换：避免 1↔3 互换时相互覆盖
+        const apply = (txt) => {
+          let out = String(txt || ""), i = 0;
+          const undo = {};
+          for (const [o, n] of Object.entries(remap)) {
+            const token = `\u0001PIC${i++}\u0001`;
+            undo[token] = n;
+            out = out.split(`<Picture ${o}>`).join(token);
+          }
+          for (const [tk, n] of Object.entries(undo)) out = out.split(tk).join(`<Picture ${n}>`);
+          return out;
+        };
+        const nScript = apply(script), nPrefix = apply(prefix);
+        ta.set(nScript);
+        prefixTa.set(nPrefix);
+        s.set({ script: nScript, prefix: nPrefix });
+        const done = Object.entries(remap).map(([o, n]) => `<Picture ${o}>→${n}`).join("、");
+        ctx.toast(`已对齐 ${changed} 处引用（${done}）${miss.length ? ` · ${miss.length} 个缺素材` : ""}，正在重新拆分…`);
+        await doSplit();
+      } catch (e) {
+        ctx.toast("对齐失败: " + e.message, true);
+      }
+    },
+  }, "🎯 对齐引用");
 
   /* 📦 自动从剧本头部抽公共前缀（不对齐旧包：哪怕 prefix 已填也覆盖——用户明确点了按钮） */
   const extractBtn = h(
@@ -708,7 +785,7 @@ export function createScriptPanel(ctx) {
             h("button", { class: "btn", style: { padding: "3px 9px", fontSize: 11.5 }, onclick: () => { ta.focus(); try { document.execCommand("selectAll"); } catch (_) {} } }, "⊞ 全选"),
             h("button", { class: "btn", style: { padding: "3px 9px", fontSize: 11.5, borderColor: "#a33" }, onclick: () => { if (!ta.value() && !prefixTa.value()) return; if (!confirm("清空剧本与公共前缀？")) return; ta.set(""); prefixTa.set(""); s.set({ script: "", prefix: "" }); } }, "🗑 清空")),
           ta,
-          h("div", { class: "row", style: { marginTop: 8 } }, splitBtn, extractBtn, planBtn, adaptBtn)),
+          h("div", { class: "row", style: { marginTop: 8 } }, splitBtn, alignBtn, extractBtn, planBtn, adaptBtn)),
         h("div", { class: "col" },
           h("div", { class: "row", style: { marginBottom: 4 } },
             h("span", { class: "label", style: { margin: 0 } }, "公共前缀（角色/场景定义，可空）"),
