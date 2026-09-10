@@ -597,6 +597,34 @@ async def studio_asset_plan(req):
     if not roles and not scenes:
         # 回退旧解析（剧本正文里「角色：… / 场景：…」）
         roles, scenes = _extract_defs(script + "\n" + prefix)
+    # 角色 desc 里可能夹着 <Picture N> 引用（前缀行「角色 1 - 云妙衣：<Picture 1> 高盘发…」）：
+    # 生成资产图要的是「干净外观描述 + 参考图编号」，所以抽出来放 ref、从 desc 里剥掉
+    try:
+        for _r in list(roles) + list(scenes):
+            if _r.get("ref"):
+                _r["desc"] = re.sub(r"<\s*(?:Picture|Subject|Video|Audio)\s*\d+\s*>", "", str(_r.get("desc") or "")).strip()
+                continue
+            _m = re.search(r"<\s*(Picture|Subject|Video)\s*(\d+)\s*>", str(_r.get("desc") or ""))
+            if _m:
+                _r["ref"] = "<%s %s>" % (_m.group(1).capitalize(), int(_m.group(2)))
+                _r["desc"] = re.sub(r"<\s*(?:Picture|Subject|Video|Audio)\s*\d+\s*>", "", str(_r.get("desc") or "")).strip(" ，,。.")
+                _r["full"] = (_r.get("name") or "") + ("，" + _r["desc"] if _r["desc"] else "")
+    except Exception:
+        pass
+    # 生产模板：角色写在每个镜头的「本镜出场角色」块里 → 并入（同名去重）
+    try:
+        _have = {str(r.get("name") or "").strip() for r in roles}
+        _have |= {str(x.get("name") or "").strip() for x in scenes}
+        for c in _cast_from_script(script):
+            nm = str(c.get("name") or "").strip()
+            if not nm or nm in _have:
+                continue
+            _have.add(nm)
+            desc = str(c.get("desc") or "").strip()
+            roles.append({"name": nm, "desc": desc, "full": (nm + "，" + desc) if desc else nm,
+                          "ref": c.get("tag") or ""})
+    except Exception:
+        pass
     return _json({"roles": roles, "scenes": scenes, "style": style})
 
 
@@ -711,6 +739,12 @@ _H3_CN_STRIP_RE = re.compile(
     r"(?:[｜|·][^\n*]{0,40})?[ \t]*\*{0,2}[ \t]*", re.M)
 # 片尾「字幕卡」标签行 → 只删标签、保留卡文字
 # （H3 规则里双引号文本 = 画内字幕，正好就是字幕卡语义）
+# 生产模板的时长标签：[时长 8 秒] / （时长 8秒）
+_DUR_LABEL_RE = re.compile(r"时长\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:s|秒)", re.IGNORECASE)
+# 独立成行的 [时长 N 秒] —— 剥掉不进正文
+_DUR_LABEL_LINE_RE = re.compile(r"^\s*[\[（(]\s*时长\s*[:：]?\s*[0-9]+(?:\.[0-9]+)?\s*(?:s|秒)?\s*[\]）)]\s*$", re.M)
+
+
 _CARD_LABEL_RE = re.compile(
     r"^[ \t]*\*{0,2}[【\[（(]?\s*(?:字幕卡|片尾字幕|结束卡|标题卡|定格卡|片尾卡)\s*[】\]）)]?\s*\*{0,2}[ \t]*$",
     re.M)
@@ -759,6 +793,13 @@ def _h3_parse_marker_durations(bodies):
                 v = float(m.group(1))
             except ValueError:
                 v = None
+        if v is None:
+            m2 = _DUR_LABEL_RE.search(head)     # 生产模板：[时长 8 秒]
+            if m2:
+                try:
+                    v = float(m2.group(1))
+                except ValueError:
+                    v = None
         if v is None:
             v = _tc_range_dur(head)
         out.append(v)
@@ -872,6 +913,17 @@ def _split_script(script, prefix=None, strip=True):
             if marker_durs:
                 marker_durs.pop(0)
 
+    # 生产模板：角色定义散在每个镜头的「本镜出场角色」块里 → 合并成公共前缀行，
+    # 让「一键流水线 / 生成设定图 / 引用匹配」直接可用（它们都只读前缀）。
+    # 放在 _split_script 里，split / asset_plan / 长文档适配 等所有入口都能拿到。
+    try:
+        _cast = [c for c in _cast_from_script(raw) if c.get("name")]
+        if _cast:
+            _lines = "\n".join(_cast_to_prefix_lines(_cast))
+            header = (header + "\n\n" + _lines).strip() if header else _lines
+    except Exception:
+        pass
+
     bodies, kept_prefixes = [], []
     for b in blocks:
         body_text = b
@@ -881,6 +933,8 @@ def _split_script(script, prefix=None, strip=True):
             # 时间码镜头头 / 中文数字镜号（各自行首最多剥一次）
             body_text = _H3_TC_STRIP_RE.sub("", body_text, count=1)
             body_text = _H3_CN_STRIP_RE.sub("", body_text, count=1)
+            # 生产模板的独立 [时长 8 秒] 行 → 剥掉（时长已由 marker_durs 提供）
+            body_text = _DUR_LABEL_LINE_RE.sub("", body_text, count=1)
             # 片尾「字幕卡」标签行 → 去掉标签，保留卡上的字幕文本
             body_text = _CARD_LABEL_RE.sub("", body_text)
             body_text = re.sub(r"\|\s*$", "", body_text.strip())
@@ -903,6 +957,55 @@ def _extract_dur(text):
         except (TypeError, ValueError):
             pass
     return last
+
+
+_CAST_HEAD_RE = re.compile(r"^\s*\**\s*[【\[]\s*本\s*镜\s*出场\s*角色\s*[】\]]\s*\**\s*$")
+_CAST_LINE_RE = re.compile(
+    r"^\s*<\s*(Picture|Subject|Video)\s*(\d+)\s*>\s*([^：:\n]{1,24}?)\s*"
+    r"(?:[（(]\s*S\s*\d+\s*[）)])?\s*[:：]\s*(.+)$", re.IGNORECASE)
+
+
+def _cast_from_script(script):
+    """从生产模板每镜的「本镜出场角色」块里抽角色（按首现顺序、同名去重）。
+
+    生产模板（内置 skills）把角色连同外观写在每个镜头里，公共前缀只有「详细描述」，
+    所以「生成资产图」必须从镜头里捞角色，否则一个都列不出来。
+    返回 [{name, desc, tag}]，tag 形如 <Picture 1> = 该角色绑定的参考图编号。
+    """
+    out, seen, in_block = [], set(), False
+    for raw in str(script or "").splitlines():
+        ln = raw.strip()
+        if _CAST_HEAD_RE.match(ln):
+            in_block = True
+            continue
+        if not in_block or not ln:
+            continue
+        m = _CAST_LINE_RE.match(ln)
+        if m:
+            nm = (m.group(3) or "").strip()
+            if nm and nm not in seen:
+                seen.add(nm)
+                out.append({"name": nm, "desc": (m.group(4) or "").strip(),
+                            "tag": "<%s %d>" % (m.group(1).capitalize(), int(m.group(2)))})
+            continue
+        if re.match(r"^\s*\**\s*[【\[]", ln):
+            in_block = False
+    return out
+
+
+def _cast_to_prefix_lines(cast):
+    """角色 → 公共前缀行（`角色 N - 名字：<Picture K> 描述`）。
+
+    「一键流水线 / 生成设定图 / 引用匹配」都只读公共前缀，所以必须转成前缀行才通。
+    """
+    lines = []
+    for i, c in enumerate(cast or [], 1):
+        nm = (c.get("name") or "").strip()
+        if not nm:
+            continue
+        body = ((c.get("tag") or "") + " " + (c.get("desc") or "")).strip()
+        lines.append("角色 %d - %s：%s" % (i, nm, body) if body else "角色 %d - %s" % (i, nm))
+    return lines
 
 
 def _scan_refs_in_text(text):
@@ -1150,13 +1253,13 @@ def _extract_defs(text):
         if core in _DEF_SECTION_HEADERS:
             cur_section = _DEF_SECTION_HEADERS[core]
             continue
-        m = re.match(r"(?:角色|人物|role)\s*\d{0,2}\s*[-－—–:：]?\s*(.+)", line, re.IGNORECASE)
+        m = re.match(r"(?:角色|人物|role)\s*\d{0,2}\s*[-－—–:：]?\s*(?!动作|特效|介绍|设定|关系|列表|之间|音|声|名|的|与)(.+)", line, re.IGNORECASE)
         if m and m.group(1).strip():
             d = _parse_def(m.group(1).strip())
             if _def_name_ok(d.get("name")):
                 roles.append(d)
                 continue
-        m = re.match(r"(?:场景|scene|地点|环境)\s*\d{0,2}\s*[-－—–:：]?\s*(.+)", line, re.IGNORECASE)
+        m = re.match(r"(?:场景|scene|地点|环境)\s*\d{0,2}\s*[-－—–:：]?\s*(?!介绍|设定|关系|列表|之间|音|声|名|的|与)(.+)", line, re.IGNORECASE)
         if m and m.group(1).strip():
             got = [d for d in _split_multi_defs(m.group(1).strip()) if _def_name_ok(d.get("name"))]
             if got:
@@ -1232,7 +1335,8 @@ def _parse_assets_text(text):
         返回 (role_dict, next_idx) 或 None。
         同时支持单行格式：`<Subject 1> 小白兔 描述：雪白绒毛`。"""
         line = lines[idx].strip()
-        m = re.search(r"<\s*Subject\s*(\d+)\s*>\s*(.*)", line, re.IGNORECASE)
+        # 同样锚定行首：`角色 1 - 小白兔：<Subject 1>` 里的标记是引用，不是定义行
+        m = re.match(r"^[\s\-*•·>`]*<\s*Subject\s*(\d+)\s*>\s*(.*)", line, re.IGNORECASE)
         if not m:
             return None
         raw = m.group(2) or ""
@@ -1266,14 +1370,17 @@ def _parse_assets_text(text):
     # ---- Pass 1：<Subject N> + <Style 全局> ----
     for idx in range(len(lines)):
         line = lines[idx].strip()
-        if re.search(r"<\s*Style", line, re.IGNORECASE) or re.match(r"(?:全局风格|风格)\s*[:：]", line, re.IGNORECASE):
+        if (re.search(r"<\s*Style", line, re.IGNORECASE)
+                or re.match(r"(?:全局风格|风格)\s*[:：]", line, re.IGNORECASE)
+                # 生产模板：`**详细描述：**` 独占一行 + 后续段落 = 全局风格
+                or re.match(r"^\s*\**\s*(?:详细描述|全局描述|整体描述|画面描述|风格描述)\s*\**\s*[:：]?\s*\**\s*$", line)):
             # 先取「<Style 全局> 值 / 风格：值」同行里的值（此前只扫后续行，丢失同行值）
             sm0 = re.search(r"<\s*Style[^>]*>\s*[:：]?\s*(.+)", line, re.IGNORECASE)
             val0 = ""
             if sm0 and (sm0.group(1) or "").strip():
                 val0 = sm0.group(1).replace("`", "").replace("*", "").strip().rstrip("。.")
-            elif re.match(r"(?:全局风格|风格)\s*[:：]", line, re.IGNORECASE):
-                _v = re.split(r"[:：]", line, 1)[1].strip() if re.search(r"[:：]", line) else ""
+            elif re.search(r"[:：]", line):
+                _v = re.split(r"[:：]", line, 1)[1].strip()
                 val0 = _v.replace("`", "").replace("*", "").strip().rstrip("。.")
             if val0:
                 style_parts.append(val0)
@@ -1286,6 +1393,9 @@ def _parse_assets_text(text):
                     j += 1
                     continue
                 if nxt.startswith(("|", "#", "---")):
+                    break
+                # 角色/场景定义行不是风格内容（生产模板：详细描述段后紧跟「角色 1 - 名字：…」）
+                if re.match(r"^\s*\**\s*(?:角色|场景|人物|[Rr]ole|[Ss]cene)\s*\d*\s*[-－—–:：]", nxt):
                     break
                 # ⚠ 必须锚定行首 + 冒号：以前用 search，风格正文里只要出现「色调」两字
                 # 就会从中间截断（「明亮暖色调，柔光滤镜…」→ 只剩「，柔光滤镜…」）
@@ -1307,7 +1417,10 @@ def _parse_assets_text(text):
     # 先用 _parse_picture_template 做一行预处理（拿干净 name + 完整 desc + 判定 role/scene），
     # 再走主流程追加。
     for idx in range(len(lines)):
-        m = re.search(r"`?\s*<\s*Picture\s*(\d+)\s*>\s*`?\s*[:：]?\s*(.*)", lines[idx].strip(), re.IGNORECASE)
+        # ⚠ 必须锚定行首：`角色 1 - 云妙衣：<Picture 1> 描述` 里的 <Picture 1> 是**引用**，
+        #   不是定义行；用 search 会从这种行里再切出一个假角色（用户实报：角色列表出现「高盘发垂长发」）
+        m = re.match(r"^[\s\-*•·>`]*<\s*Picture\s*(\d+)\s*>\s*`?\s*[:：]?\s*(.*)",
+                     lines[idx].strip(), re.IGNORECASE)
         if not m:
             continue
         raw_tail = (m.group(2) or "").replace("`", "").replace("*", "").strip().rstrip("。.")

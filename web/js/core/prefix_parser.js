@@ -27,6 +27,8 @@
 // ---------------- 正则 ----------------
 const RE_STYLE_TAG = /^\s*<\s*Style\s*(?:全局|全局风格|global)?\s*>\s*[:：]?\s*(.*?)\s*$/i;
 const RE_STYLE_KV = /^\s*(?:全局\s*)?(?:风格|画风|样式|基调|视觉风格|style)\s*[:：]\s*(.+)$/i;
+// 生产模板：「**详细描述：**」/「详细描述：xxx」→ 全局风格（可独占一行，内容在后续段落）
+const RE_STYLE_DESC = /^\s*\**\s*(?:详细描述|全局描述|整体描述|画面描述|风格描述)\s*\**\s*[:：]?\s*\**\s*(.*?)\s*$/;
 const RE_TAG = /^\s*<\s*(Subject|Picture)\s*[_\-]?\s*(\d+)\s*>\s*(.*?)\s*$/i;
 
 // 小标题：「【角色】」「**场景设定**」「## 一、人物」「场景：」……独立成行 → 决定后续条目归属
@@ -159,6 +161,25 @@ export function parsePrefixDef(prefix) {
       flushPending();
       const v = (m[1] || "").trim();
       if (v) out.style = out.style ? (out.style + "，" + v) : v;
+      continue;
+    }
+
+    // 1c) 生产模板：「**详细描述：**」独占一行 → 其后到空行/下一条定义之间的文字都是全局风格
+    m = RE_STYLE_DESC.exec(clean);
+    if (m) {
+      flushPending();
+      let buf = (m[1] || "").trim();
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        const t = stripMd(lines[j]);
+        if (!t) { if (buf) break; continue; }
+        if (/^(?:<|【|\[)/.test(t)) break;
+        if (RE_TAG.test(t) || RE_SECTION.exec(t) || RE_ROLE_LINE.test(t) || RE_SCENE_LINE.test(t)) break;
+        if (/^(?:角色|场景|人物|role|scene)\s*\d*\s*[-－—–:：]/.test(t)) break;
+        buf = buf ? (buf + " " + t) : t;
+      }
+      if (buf) out.style = out.style ? (out.style + "，" + buf) : buf;
+      i = j - 1;
       continue;
     }
 
@@ -386,25 +407,32 @@ export function splitNameDesc(s) {
 export function buildDefinitionPrompt(kind, entry, ctx) {
   const { name = "", resolved = "", raw = "" } = entry || {};
   const tone = (ctx && ctx.style ? String(ctx.style).trim() : "") || "电影级光影，超高清细腻";
+  // 描述里可能夹着素材引用标记（`角色 1 - 云妙衣：<Picture 1> 高盘发…`）→ 送进生图提示词前剥掉，
+  // 否则标记会被模型当成画面内容（生成出"写着 Picture 1 的图"）
+  const cleanRefs = (s) => String(s || "")
+    .replace(/<\s*(?:Picture|Subject|Video|Audio)\s*\d+\s*>/gi, "")
+    .replace(/\s{2,}/g, " ").trim();
   if (kind === "role") {
+    const d = cleanRefs(resolved);
     return (
       `${tone}。` +
       `角色三视图设定卡：${name || "角色"}。` +
-      (resolved ? `外观描述：${resolved}。` : "") +
+      (d ? `外观描述：${d}。` : "") +
       `同一角色正面 / 侧面 / 背面三视角并排显示，全身完整（包括脚），` +
       `脸型 · 发型 · 服饰 · 配色在三个视角间严格一致，电影级构图，超高清。`
     );
   }
   if (kind === "scene") {
+    const d = cleanRefs(resolved);
     return (
       `${tone}。` +
       `场景概念设定图：${name || "场景"}。` +
-      (resolved ? `环境描述：${resolved}。` : "") +
+      (d ? `环境描述：${d}。` : "") +
       `无人物，远景/全景构图，自然光为主，环境氛围与 ${tone} 一致，干净无杂物，超高清。`
     );
   }
   // fallthrough：用整行原文当 desc
-  return `${tone}。${name || raw || ""}。统一的高清细节，电影感。`;
+  return `${tone}。${cleanRefs(name || raw)}。统一的高清细节，电影感。`;
 }
 
 /**
