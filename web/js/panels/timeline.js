@@ -166,9 +166,11 @@ export function createTimelinePanel(ctx) {
     const st = ctx.store.get();
     if (typeof st.vidW === "number" && st.vidW >= 64 && st.vidW !== P.output.width) P.output.width = st.vidW;
     if (typeof st.vidH === "number" && st.vidH >= 64 && st.vidH !== P.output.height) P.output.height = st.vidH;
+    // H3 官方百万像素（0.1–2）：>0 时后端会按它换算宽高并写进 timeline_data.output.megapixels
+    if (typeof st.vidMP === "number" && st.vidMP !== P.output.megapixels) P.output.megapixels = st.vidMP;
   };
   const _syncStoreFromP = () => {
-    ctx.store.set({ vidW: P.output.width, vidH: P.output.height });
+    ctx.store.set({ vidW: P.output.width, vidH: P.output.height, vidMP: P.output.megapixels || 0 });
   };
   // 1) 初始化：从 store 读初始值（避免来回切换面板反复覆盖）
   _syncPfromStore();
@@ -1070,6 +1072,7 @@ export function createTimelinePanel(ctx) {
       video_vae_name: P.model.vvae || undefined, audio_vae_name: P.model.avae || undefined,
       lora_name: P.model.lora && P.model.lora !== "(无)" ? P.model.lora : undefined,
       lora_strength: P.model.loraS, width: P.output.width, height: P.output.height,
+      megapixels: P.output.megapixels || undefined,   // H3 官方百万像素（0.1–2）→ 后端换算并写进 timeline_data
       ref_max_size: P.output.ref_size, frame_rate: P.output.fps, steps: P.output.steps,
       cfg: P.output.cfg, shift_video: P.output.shift_video, shift_audio: P.output.shift_audio,
       sampler: P.output.sampler || undefined, scheduler: P.output.scheduler || undefined,
@@ -1284,7 +1287,13 @@ export function createTimelinePanel(ctx) {
     if (P.mode === "i2v") payload.first_frame = (frames && frames[0]) || "";
     else if (P.mode === "fl2v") { payload.first_frame = (frames && frames[0]) || ""; payload.last_frame = (frames && frames[1]) || ""; }
     else if (P.mode === "fl2v_tail") payload.last_frame = (frames && frames[0]) || "";
-    else if (P.mode === "r2v") payload.refs = imgs;
+    else if (P.mode === "r2v") {
+      payload.refs = imgs;
+      // 音色参考：r2v 组节点有 ref_audios.ref_audio_{k} 输入（官方），把音频小格里的素材一起送过去，
+      // 否则「音色参考 <Audio N>」只是句空话（用户实报：音频参考不起作用）
+      const auds = ((c.media && c.media.audio) || []).filter(Boolean).slice(0, 3);
+      if (auds.length) payload.audio = auds;
+    }
     println(`▶ 第${sh.index}镜（${modeLabel(P.mode)} · ${sec}s · ${isFramesMode
       ? `首帧${(frames && frames[0]) ? "✓" : "✗"} 尾帧${(frames && frames[1]) ? "✓" : "✗"}`
       : `图${imgs.length} 视${c.media.video.length} 音${c.media.audio.length}`}${(!isFramesMode && !imgs.length) ? " · 无素材(纯文本)" : ""}）`, "#9fd0ff");
@@ -1421,28 +1430,63 @@ export function createTimelinePanel(ctx) {
     const st = ctx.store.get();
     topVidSel.value = String(st.vidSize ?? DEFAULT_VID_SIZE_INDEX);
     const custom = Number(topVidSel.value) === CUSTOM_VID_SIZE_INDEX;
-    topVidW.style.display = custom ? "" : "none";
-    topVidH.style.display = custom ? "" : "none";
+    const mpOn = Number(st.vidMP || 0) > 0;
+    topVidW.style.display = (custom || mpOn) ? "" : "none";
+    topVidH.style.display = (custom || mpOn) ? "" : "none";
     topVidW.value = P.output.width; topVidH.value = P.output.height;
+    if (topVidMP) topVidMP.value = mpOn ? String(st.vidMP) : "";
   };
   const topVidSel = h("select", { class: "select", style: { width: "auto", padding: "5px 6px", fontSize: 11.5 },
     title: "视频分辨率档位（与「一键流水线」面板联动）" },
     ...VIDEO_SIZES.map(([label], i) => h("option", { value: String(i) }, label)));
   const topVidW = h("input", { class: "input", type: "number", min: 64, step: 32, style: { width: 62, padding: "4px 5px", fontSize: 11.5 }, title: "自定义宽（32 对齐）" });
   const topVidH = h("input", { class: "input", type: "number", min: 64, step: 32, style: { width: 62, padding: "4px 5px", fontSize: 11.5 }, title: "自定义高（32 对齐）" });
+  // MiniMax H3 官方「百万像素」直填（0.1–2）：与官方 ResolutionSelector 同一算式
+  //   W = round(aw*√(MP*1024²/(aw*ah))/32)*32   （aw:ah = 当前宽高比）
+  // 填了就按它算宽高并真正写进工作流（timeline_data.output.megapixels + mode=fixed）
+  const _mpToWH = (mp, w0, h0) => {
+    const w = Math.max(1, Math.round(Number(w0) || 16)), hh = Math.max(1, Math.round(Number(h0) || 9));
+    const g = (a, b) => (b ? g(b, a % b) : a);
+    const k = g(w, hh) || 1, aw = w / k, ah = hh / k;
+    const v = Math.max(0.1, Math.min(2, Number(mp) || 0));
+    const scale = Math.sqrt((v * 1024 * 1024) / (aw * ah));
+    return [Math.max(32, Math.round((aw * scale) / 32) * 32), Math.max(32, Math.round((ah * scale) / 32) * 32)];
+  };
+  const topVidMP = h("input", {
+    class: "input", type: "number", min: 0.1, max: 2, step: 0.1, placeholder: "MP",
+    style: { width: 58, padding: "4px 5px", fontSize: 11.5 },
+    title: "MiniMax H3 官方百万像素（0.1–2）：填了就按当前比例算出宽高，并写进工作流（留空=用上面的宽高）",
+  });
+  topVidMP.onchange = () => {
+    const raw = Number(topVidMP.value);
+    if (!raw || raw <= 0) {                     // 留空 → 回到纯宽高模式
+      P.output.megapixels = 0;
+      ctx.store.set({ vidMP: 0 });
+      refreshTopVid(); renderTrack();
+      return;
+    }
+    const mp = Math.max(0.1, Math.min(2, Math.round(raw * 100) / 100));
+    topVidMP.value = String(mp);
+    const [w, hh] = _mpToWH(mp, P.output.width, P.output.height);
+    P.output.megapixels = mp;
+    P.output.width = w; P.output.height = hh;
+    ctx.store.set({ vidMP: mp, vidW: w, vidH: hh });
+    ctx.toast(`已按 H3 官方 ${mp} MP 设定分辨率：${w}×${hh}（32 对齐）`);
+    refreshTopVid(); renderTrack();
+  };
   topVidSel.onchange = () => {
     const idx = Number(topVidSel.value) || 0;
     const [w, hgt] = resolveVidSize(idx, ctx.store.get().vidW, ctx.store.get().vidH);
-    ctx.store.set({ vidSize: idx, vidW: w, vidH: hgt });
-    P.output.width = w; P.output.height = hgt;
+    ctx.store.set({ vidSize: idx, vidW: w, vidH: hgt, vidMP: 0 });
+    P.output.width = w; P.output.height = hgt; P.output.megapixels = 0;
     refreshTopVid(); renderTrack();
   };
   const _topVidCustom = () => {
     const w = Math.max(64, Math.round((Number(topVidW.value) || P.output.width) / 32) * 32);
     const hgt = Math.max(64, Math.round((Number(topVidH.value) || P.output.height) / 32) * 32);
-    ctx.store.set({ vidSize: CUSTOM_VID_SIZE_INDEX, vidW: w, vidH: hgt });
-    P.output.width = w; P.output.height = hgt;
-    renderTrack();
+    ctx.store.set({ vidSize: CUSTOM_VID_SIZE_INDEX, vidW: w, vidH: hgt, vidMP: 0 });
+    P.output.width = w; P.output.height = hgt; P.output.megapixels = 0;
+    refreshTopVid(); renderTrack();
   };
   topVidW.oninput = _topVidCustom;
   topVidH.oninput = _topVidCustom;
@@ -1739,6 +1783,7 @@ export function createTimelinePanel(ctx) {
       runSelBtn,
       selAllBtn,
       h("span", { class: "muted", style: { fontSize: 11 } }, "分辨率"), topVidSel, topVidW, topVidH,
+      topVidMP, h("span", { class: "muted", style: { fontSize: 10.5 }, title: "MiniMax H3 官方百万像素：填 0.1–2 直接按比例定分辨率" }, "MP"),
       h("button", { class: "btn", style: { padding: "6px 11px" }, onclick: appendShot }, "＋ 分镜"),
       linkAllBtn,
       h("span", { class: "muted", style: { fontSize: 11 } }, "导出"),

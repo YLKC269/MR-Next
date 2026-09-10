@@ -2744,6 +2744,9 @@ async def h3_shot(req):
     first_frame = _rel(body.get("first_frame"))
     last_frame = _rel(body.get("last_frame"))
     refs = [x for x in ([_rel(r) for r in (body.get("refs") or [])] if body.get("refs") else []) if x]
+    # 音色参考（<Audio N>）：r2v 组节点 ref_audios.ref_audio_{k} —— 以前前端没发/后端没接，
+    # 用户看到的「音色参考不起作用」= 这条链整段断了
+    audios = [x for x in ([_rel(a) for a in (body.get("audio") or [])] if body.get("audio") else []) if x]
     # 幽灵素材过滤：素材被清理后，前端/store 缓存里的 rel 可能还在，这里按磁盘实际存在性剔除，
     # 否则已删除的首帧图/参考图会继续参与构图，污染其它模式的适配生成。
     dropped = []
@@ -2789,6 +2792,7 @@ async def h3_shot(req):
             mode, prompt, out_dir, seed=seed, seconds=seconds, frame_rate=fr,
             first_frame=first_frame,
             last_frame=last_frame,
+            audios=[a for a in audios if _media_exists(a)] or None,
             refs=refs or None,
             steps=int(steps) if steps not in (None, "") else None,
             cfg=float(cfg) if cfg not in (None, "") else None,
@@ -2871,12 +2875,17 @@ async def h3_dry(req):
     ff = (body.get("first_frame") or "").strip()
     lf = (body.get("last_frame") or "").strip()
     refs = body.get("refs") or []
+    audios_dry = body.get("audio") or []
+    # 干跑必须带上 opts（尺寸/步数/百万像素…），否则校验的不是"真正要跑的那张图"
+    opts_dry = body.get("opts") if isinstance(body.get("opts"), dict) else None
     server = PromptServer.instance
     try:
         graph = h3mod.build_shot_graph(
             mode, prompt, seed=1, seconds=2.0, frame_rate=24.0,
             first_frame=ff or None, last_frame=lf or None,
             refs=[x for x in refs if x] or None,
+            audios=[x for x in audios_dry if x] or None,
+            opts=opts_dry,
             _variant=variant or None,
         )
     except Exception as exc:  # noqa: BLE001

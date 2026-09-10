@@ -68,6 +68,7 @@ export function mountApp(shadow, node) {
     vidSize: 1, // 默认 720×1280 竖屏 9:16
     vidW: 720,
     vidH: 1280,
+    vidMP: 0,     // >0 = 按 MiniMax H3 官方「百万像素」出片（0.1–2），宽高由该值+比例算出
     // LoRA（3 个面板联动：生图 / 公共前缀 / 流水线）
     useLora: false,        // 是否启用 LoRA（关闭 = 编辑 LoRA 留空，不影响其他流程）
     loraFolder: "",        // 自定义 LoRA 文件夹（空 = 后端默认 models/loras）

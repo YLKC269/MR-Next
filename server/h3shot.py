@@ -10,6 +10,7 @@
 import asyncio
 import glob
 import json
+import math
 import os
 import re
 import shutil
@@ -417,7 +418,32 @@ def _frame_count(seconds, fps=24.0):
     return fc
 
 
-def _sync_timeline_size(widget):
+def _mp_to_wh(mp, w, h, multiple=32):
+    """MiniMax H3 官方 ResolutionSelector 算式：比例 + 百万像素 → 宽高（对齐 ×32）。
+
+    与 vendor/ComfyUI_MiniMax_H3_Director/director/refine_pack.py 的
+    resolution_from_selector() 同式：scale = √(MP·1024²/(aw·ah))，MP 官方钳制 0.1–16。
+    """
+    try:
+        v = float(mp)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    v = min(16.0, max(0.1, v))
+    try:
+        w = max(1, int(round(float(w or 16))))
+        h = max(1, int(round(float(h or 9))))
+    except (TypeError, ValueError):
+        w, h = 16, 9
+    k = math.gcd(w, h) or 1
+    aw, ah = w // k, h // k
+    m = max(8, int(multiple or 32))
+    scale = math.sqrt((v * 1024.0 * 1024.0) / (aw * ah))
+    return (max(m, int(round((aw * scale) / m) * m)), max(m, int(round((ah * scale) / m) * m)))
+
+
+def _sync_timeline_size(widget, megapixels=None):
     """把 widget 的 width/height/ref_max_size/total_frames 同步进 timeline_data。
 
     Director 实际按 timeline_data.output 的尺寸出图（而非 widget.width/height 顶层值），
@@ -443,6 +469,13 @@ def _sync_timeline_size(widget):
         out["width"] = w
         out["height"] = h
         out["longEdge"] = max(w, h)
+        if megapixels:
+            # 官方按 output.mode 出图：fixed=用 width/height（MP 算出来的尺寸要真正生效必须 fixed）
+            try:
+                out["mode"] = "fixed"
+                out["megapixels"] = round(float(megapixels), 3)
+            except (TypeError, ValueError):
+                pass
         td["output"] = out
     if "total_frames" in widget:
         try:
@@ -475,7 +508,7 @@ def _deep_replace_num(obj, old_num, new_num):
 
 
 def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
-                     first_frame=None, last_frame=None, refs=None, _variant=None,
+                     first_frame=None, last_frame=None, refs=None, audios=None, _variant=None,
                      steps=None, cfg=None, opts=None):
     """返回 API prompt dict（数字字符串 node id）。
 
@@ -565,9 +598,15 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             widget["cfg"] = float(cfg)
         except Exception:  # noqa: BLE001
             pass
+    # H3 官方百万像素（0.1–2）：按当前比例换算出宽高（与前端同一算式，后端兜底 → 一定生效）
+    _mp = opts_obj.get("megapixels")
+    if _mp:
+        _wh = _mp_to_wh(_mp, opts_obj.get("width"), opts_obj.get("height"))
+        if _wh:
+            opts_obj["width"], opts_obj["height"] = _wh
     # 其它 director 参数/输出尺寸覆盖
     _apply_opts_overrides(widget, opts_obj)
-    _sync_timeline_size(widget)  # 关键：把 opts 尺寸同步进 timeline_data（Director 按它出图）
+    _sync_timeline_size(widget, megapixels=_mp)  # 把尺寸 + megapixels 同步进 timeline_data
     if _variant == "no_labels":
         widget = {k: v for k, v in widget.items() if not k.startswith("bd_grp_")}
 
@@ -612,6 +651,11 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
     if mode == "r2v":
         ref_ids = [load_image(r) for r in (refs or [])[:9] if r]
         g_ins = {f"ref_images.ref_image_{k}": link(nid) for k, nid in enumerate(ref_ids)}
+        # 音色参考：<Audio N> → ref_audios.ref_audio_{N-1}
+        # （官方组节点输入名，与 ref_images.ref_image_k 同构；H3 最多 3 条参考音频）
+        aud_ids = [add("LoadAudio", {"audio": a}) for a in (audios or [])[:3] if a]
+        if aud_ids:
+            g_ins.update({f"ref_audios.ref_audio_{k}": link(nid) for k, nid in enumerate(aud_ids)})
         g_ins["prompt"] = prompt
         g_ins["duration_sec"] = float(seconds)
         grp = add("MiniMaxH3DirectorGroupReferenceToVideo", g_ins)
@@ -649,7 +693,7 @@ def _queue_extra_data(server):
 
 
 async def run_shot(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0,
-                   first_frame=None, last_frame=None, refs=None, steps=None, cfg=None,
+                   first_frame=None, last_frame=None, refs=None, audios=None, steps=None, cfg=None,
                    opts=None, timeout=2400):
     import execution
     from server import PromptServer
@@ -657,7 +701,7 @@ async def run_shot(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.
     server = PromptServer.instance
     graph = build_shot_graph(mode, prompt, seed=seed, seconds=seconds, frame_rate=frame_rate,
                              first_frame=first_frame, last_frame=last_frame, refs=refs,
-                             steps=steps, cfg=cfg, opts=opts)
+                             audios=audios, steps=steps, cfg=cfg, opts=opts)
     prompt_id = str(uuid.uuid4())
     number = float(getattr(server, "number", 0))
     server.number = int(number) + 1
@@ -830,7 +874,7 @@ def _collect_video_after_sync(mode, seed, out_dir, before_files):
 
 
 def run_shot_sync(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0,
-                  first_frame=None, last_frame=None, refs=None, steps=None, cfg=None,
+                  first_frame=None, last_frame=None, refs=None, audios=None, steps=None, cfg=None,
                   opts=None, timeout=2400):
     """同步执行 H3 出片（供 MRBoardStudio 节点 execute() 调用）。
 
@@ -844,7 +888,7 @@ def run_shot_sync(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0
     server = PromptServer.instance
     graph = build_shot_graph(mode, prompt, seed=seed, seconds=seconds, frame_rate=frame_rate,
                              first_frame=first_frame, last_frame=last_frame, refs=refs,
-                             steps=steps, cfg=cfg, opts=opts)
+                             audios=audios, steps=steps, cfg=cfg, opts=opts)
     prompt_id = "mrnext_sync_" + str(uuid.uuid4().hex)[:8]
 
     out_base = folder_paths.get_output_directory()

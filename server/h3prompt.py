@@ -403,7 +403,7 @@ def parse_shot_blocks(text, role_names=None):
     if positions:
         parts.append("本镜站位：" + "；".join(positions))
     body = "\n".join(x for x in visual_lines if x.strip()).strip()
-    body = _sub_tags_with_names(body, cast)
+    body = _clean_visual_text(body)
     if body:
         parts.append(body)
 
@@ -416,13 +416,15 @@ def parse_shot_blocks(text, role_names=None):
     }
 
 
-def _sub_tags_with_names(text, cast):
-    """把画面里的 <Picture N>/<Audio N> 换成角色名（H3 不认识这些标记，留着只会稀释注意力）。"""
-    def rep(m):
-        key = _tag_key(m.group(0))
-        entry = cast.get(key)
-        return entry.get("name") if entry else ""
-    out = RE_ANY_TAG.sub(rep, str(text or ""))
+def _clean_visual_text(text):
+    """只做空白/标点清理，**保留** <Picture N>/<Audio N> 标记。
+
+    ⚠ 不能把这些标记换成角色名：它们是 H3 官方绑定参考槽的指针 ——
+    `ref_image_k` 的 tooltip 原文就是 "Reference image for <Picture {k+1}>"，
+    `<Audio N>` 对应 `ref_audios.ref_audio_{N-1}`。替换成人名 = 参考图/音色失去绑定
+    （用户实报：音频参考不起作用）。
+    """
+    out = str(text or "")
     out = re.sub(r"[ \t]{2,}", " ", out)
     out = re.sub(r"：\s*：", "：", out)
     out = re.sub(r"\s+([：:，。；、])", r"\1", out)      # 「音色参考 ：」→「音色参考：」
@@ -431,8 +433,8 @@ def _sub_tags_with_names(text, cast):
 
 
 def _clean_prefix(prefix):
-    """前缀送进提示词前清掉素材引用标记 <Picture/Subject/Audio/Video N>（只保留人名与描述）。"""
-    out = RE_ANY_TAG.sub("", str(prefix or ""))
+    """前缀送进提示词前只做空白清理（**保留** <Picture N> 等参考槽指针，见 _clean_visual_text）。"""
+    out = str(prefix or "")
     out = re.sub(r"[ \t]{2,}", " ", out)
     out = re.sub(r"\s+([：:，。；、])", r"\1", out)
     return "\n".join(ln.strip() for ln in out.splitlines() if ln.strip()).strip()

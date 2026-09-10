@@ -187,14 +187,23 @@ export function createMentionEditor(ctx, { initial = "", favorites = [], assets 
     // 读回 innerText 时换行全丢 → 后端行首分镜标记 ^【分镜N】全部失配 → 0 分镜。
     // 显式转 <br> 让 DOM 永远保有换行结构，innerText 读回必然带 \n（不依赖 CSS pre-wrap）。
     html = html.replace(/\n/g, "<br>");
+    // ⚠ 渲染必须「先占位、最后统一还原」，不能边扫边插 HTML：
+    //   ① 显式标记那趟会把 <Picture 1> 换成带 mtxt 的 chip HTML；
+    //   ② 素材名那趟接着扫全文，就会在**刚生成的 chip 文本里**再包一层 token
+    //   → 两层 chip 叠在一起（用户实报："标记容易叠一起看不清"）。
+    //   两个素材名互为子串（"云妙衣" vs "云妙衣三视图"）同理。占位符可彻底避免。
+    const holders = [];
+    const hold = (hstr) => { holders.push(hstr); return "\u0001H" + (holders.length - 1) + "\u0001"; };
     // ① 显式引用标记：<Picture N> / <Audio N> / <Video N> / <Subject N>（esc 后 < 变 &lt;）
-    html = html.replace(/&lt;(Picture|Audio|Video|Subject)\s+(\d+)\s*&gt;/gi, (m, tag, n) => tagTokenHTML(tag, n));
-    // ② 素材名自动命中：文本里出现收藏名 → 突出引用标记
-    for (const name of unique()) {
-      if (!name) continue;
-      html = html.replace(new RegExp(esc(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
-        tokenHTML(name, relOf(name)));
+    html = html.replace(/&lt;(Picture|Audio|Video|Subject)\s+(\d+)\s*&gt;/gi, (m, tag, n) => hold(tagTokenHTML(tag, n)));
+    // ② 素材名自动命中：文本里出现收藏名/素材名 → 突出引用标记（长名优先，短的不会吃掉长名的一段）
+    const _names = unique().filter(Boolean).sort((a, b) => b.length - a.length);
+    for (const name of _names) {
+      const re = new RegExp(esc(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+      html = html.replace(re, () => hold(tokenHTML(name, relOf(name))));
     }
+    // ③ 统一还原占位符（这一步之后才允许写进 DOM）
+    html = html.replace(/\u0001H(\d+)\u0001/g, (m, i) => holders[Number(i)] || "");
     box.innerHTML = html || "";
   }
   // 纯文本真相：commit/replaceFirstTag/box.value 都用它（render 会把 <Picture N> 转成 mtok，innerText 丢尖括号）。
