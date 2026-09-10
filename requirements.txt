@@ -1,0 +1,15 @@
+# ComfyUI_MRBoard_Next 一体化整合包依赖
+# （ComfyUI 环境通常已自带 torch / numpy / Pillow；缺失时 ComfyUI 本体也无法运行）
+
+# 剪辑合成 / 视频抽帧（成片拼接、缩略图）
+imageio_ffmpeg
+
+# 图片生成（占位图 / 设定图）
+Pillow
+
+# ---- vendored H3 引擎（ComfyUI_MiniMaxH3_Director）可选依赖 ----
+# 缺失只影响对应增强功能，核心出片不受影响：
+# v2v 源视频解码（时间线导入外部视频）
+opencv-python-headless
+# 智能镜头分割（剪辑页「智能分割」按钮）
+scenedetect>=0.6.4,<0.8
