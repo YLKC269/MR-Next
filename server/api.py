@@ -794,7 +794,11 @@ def _split_script(script, prefix=None, strip=True):
         elif (blocks
                 and not _H3_LINE_RE.search(blocks[0])
                 and not _SEG_RE.match(blocks[0])
-                and not _SEG_INLINE_RE.search(blocks[0])):
+                and not _SEG_INLINE_RE.search(blocks[0])
+                # ⚠ 只有 1 块时：带时长的一律当分镜。
+                # 否则「单镜剧本」切分后只剩它自己 → 被当定义头 pop 掉 → bodies=[] →
+                # 前端收到「剧本为空或未切出分镜」400（用户实报：单镜/试拍脚本拆不出来）。
+                and (len(blocks) >= 2 or not _DUR_RE.search(blocks[0]))):
             header = blocks.pop(0)
             if marker_durs:
                 marker_durs.pop(0)
@@ -915,12 +919,42 @@ def _scan_per_shot_refs(bodies, folder, tagBindings=None, roleImages=None, prefi
         nm = (m.group(2) or "").strip().split()[0] if m.group(2) else ""
         if nm and nm not in name_to_rel:
             name_to_rel[nm] = None
-    # 前端送来的 roleImages 直接覆盖
+    # prefix 中的"<Picture N> 名字：描述" → 名字（场景也常写成 Picture 标记，正文里写名字同样要带图）
+    for m in re.finditer(r"<Picture\s+(\d+)>\s*[:：]?\s*([^：:\n\r]+)", prefix or "", re.IGNORECASE):
+        nm = (m.group(2) or "").strip().split()[0] if m.group(2) else ""
+        if nm and nm not in name_to_rel:
+            name_to_rel[nm] = None
+    # 名字 → rel：前端送来的 roleImages 直接覆盖（最权威，含用户手动绑定）；
+    # 前端没给（或给的过期）时，后端自己解析，保证 API 自洽：
+    #   ① 收藏库同名条目（用户看到的"名字 → 文件"就是它）
+    #   ② 素材库文件名主名 == 名字
     if isinstance(roleImages, dict):
         for nm, rl in roleImages.items():
             # 虚拟引用（@image#1:xxx.png）不是真实文件，拒绝作为角色图注入
             if nm and rl and _usable_rel(rl):
                 name_to_rel[nm] = rl
+    try:
+        _favs = favmod.list_items()
+    except Exception:  # noqa: BLE001
+        _favs = []
+    for _nm in list(name_to_rel.keys()):
+        if name_to_rel.get(_nm):
+            continue
+        rel_found = ""
+        for _it in _favs:
+            if str(_it.get("name") or "").strip() == _nm and _usable_rel(_it.get("rel")):
+                rel_found = str(_it.get("rel") or "").strip()
+                break
+        if not rel_found:
+            for _pool in (images, audios, videos):
+                for _it in _pool.values():
+                    if os.path.splitext(_it.get("fileName") or "")[0] == _nm and _usable_rel(_it.get("rel")):
+                        rel_found = str(_it.get("rel") or "").strip()
+                        break
+                if rel_found:
+                    break
+        if rel_found:
+            name_to_rel[_nm] = rel_found
 
     # 只保留合法 rel：虚拟引用（@image#1:xxx.png）/ 空值一律丢弃，
     # 否则「点过一次脏素材」就会把脏 rel 永久写进绑定，之后每镜都被污染。
@@ -932,53 +966,56 @@ def _scan_per_shot_refs(bodies, folder, tagBindings=None, roleImages=None, prefi
     for b in bodies:
         ps = {"refs": [], "audios": [], "videos": [], "_missing": 0}
         used_rels = set()  # 去重
-        # ① 显性标记：<Tag N> 必须有手动绑定才注入
+        # ① 显性标记 <Tag N>（Picture/Video/Audio/Subject）：
+        #    优先用手动绑定；**没绑定就按素材库序号回退**（与编辑器 token 的显示完全一致）。
+        #    老规则「必须手动绑定才注入」会造成"提示词里标记显示了、两边格子里没素材"的错觉
+        #    （用户实报：自动拆分到导演台后，引用素材没全带到下方格子里）。
         for tm in _TAG_RE.finditer(b or ""):
-            tname = tm.group(1).lower()  # picture/audio/video
+            tname = tm.group(1).lower()  # picture/audio/video/subject
             n = int(tm.group(2))
-            tag_str = f"<{tname.capitalize()} {n}>"
-            # Subject 标签：正则没匹配到，手动补一次扫描
-            rel = tag_bindings.get(tag_str) or ""
-            if not rel:
-                # Subject 不在 _TAG_RE 内（只匹配 Picture/Audio/Video），单独处理
-                continue
             pool_kind = REF_TO_KIND.get(tname)
             if pool_kind is None:
                 continue
-            if rel in used_rels:
+            tag_str = "<%s %d>" % (tm.group(1)[:1].upper() + tm.group(1)[1:].lower(), n)
+            rel = tag_bindings.get(tag_str) or ""
+            if not rel:
+                # 素材库同 kind 的第 N 个（1-based）—— 与前端 fileByIndex 同一套编号
+                it0 = (POOLS.get(pool_kind) or {}).get(n) or {}
+                rel = it0.get("rel") or ""
+            if not rel or rel in used_rels:
                 continue
             used_rels.add(rel)
             list_key = LIST_KEY[tname]
             if len(ps[list_key]) >= LIMITS[pool_kind]:
                 continue
             file_name = rel.split("/")[-1] if rel else ""
-            it = {"kind": pool_kind, "index": 0, "rel": rel,
-                  "fileName": file_name, "type": "input", "subfolder": sub.rstrip("/") if sub else ""}
-            ps[list_key].append(it)
-        # ①b Subject 标签（独立扫描，因为 _TAG_RE 不包含 Subject）
-        for tm in re.finditer(r"<Subject\s+(\d+)>", b or "", re.IGNORECASE):
-            n = int(tm.group(1))
-            tag_str = f"<Subject {n}>"
-            rel = tag_bindings.get(tag_str) or ""
+            ps[list_key].append({"kind": pool_kind, "index": 0, "rel": rel,
+                                 "fileName": file_name, "type": "input",
+                                 "subfolder": sub.rstrip("/") if sub else ""})
+        # ② 角色名全自动：扫描 prefix 声明的名字在 body 里出现 → 注入对应 rel
+        #    ⚠ 边界规则不能用 "(?![汉字])" —— 中文里名字后面天然紧跟汉字（"小白兔跳过来"），
+        #      那样几乎永远匹配不上（用户实报：拆分后引用素材没全带过来，只剩场景名那张）。
+        #      改为：左边不能是字母/数字（防英文名嵌词）；若该位置属于"更长的已知名字"
+        #      （如 张三丰 里的 张三）则跳过，让更长的名字去命中。
+        _names_sorted = sorted([n for n, r in name_to_rel.items() if n and r], key=len, reverse=True)
+        for name in _names_sorted:
+            rel = name_to_rel.get(name) or ""
             if not rel:
                 continue
             if rel in used_rels:
                 continue
-            used_rels.add(rel)
-            if len(ps["refs"]) >= LIMITS["image"]:
-                continue
-            file_name = rel.split("/")[-1] if rel else ""
-            ps["refs"].append({"kind": "image", "index": 0, "rel": rel,
-                               "fileName": file_name, "type": "input", "subfolder": sub.rstrip("/") if sub else ""})
-        # ② 角色名全自动：扫描 prefix 声明的名字在 body 里出现 → 注入对应 rel
-        for name, rel in name_to_rel.items():
-            if not rel or not name or len(name) < 1:
-                continue
-            if name in used_rels:
-                continue
-            # 用前后非字符边界判断（避免"张三"匹配"张三丰"）
-            pat = re.compile(r"(?<![一-鿿A-Za-z0-9])" + re.escape(name) + r"(?![一-鿿A-Za-z0-9])")
-            if not pat.search(b or ""):
+            longer = [n2 for n2 in _names_sorted if n2 != name and name in n2]
+            hit = False
+            for mm in re.finditer(re.escape(name), b or ""):
+                st = mm.start()
+                if st > 0 and (b or "")[st - 1].isalnum():
+                    continue
+                seg = (b or "")[st: st + 12]
+                if any(seg.startswith(l) for l in longer):
+                    continue          # 这是"张三丰"里的"张三" → 交给更长的那条
+                hit = True
+                break
+            if not hit:
                 continue
             used_rels.add(rel)
             if len(ps["refs"]) >= LIMITS["image"]:

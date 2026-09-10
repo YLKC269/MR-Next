@@ -241,9 +241,71 @@ export function createTimelinePanel(ctx) {
     if (f !== _lastFolder) { _lastFolder = f; loadAssets().then(() => renderAll && renderAll()); }
   }, 1500);
   // 首屏：editorFor 同步构建时 assets 可能还没加载完；这里 reload 一次并触发刷新
+  // （同时给已建立的每镜补一次"正文引用"——那时素材库才有数据可解析）
   loadAssets().then(() => {
-    if (assets && assets.length) renderAll && renderAll();
+    if (assets && assets.length) {
+      Object.keys(shotsCfg).forEach((k) => { try { mergeTextRefs(Number(k)); } catch (_) {} });
+      renderAll && renderAll();
+    }
   });
+
+  // ---------- 从本镜正文里"读出"它引用的素材（与提示词里显示的标记保持一致）----------
+  // 动机（用户实报）：自动拆分到导演台后，提示词里明明有 4 个素材标记，左边格子只有 1 张。
+  // 规则与编辑器 token 的解析完全一致：
+  //   <Picture N>/<Subject N> → 公共前缀手动绑定（relOfTag）优先，否则素材库第 N 张图
+  //   <Video N>/<Audio N>     → 第 N 个视频/音频
+  //   正文里直接写名字        → 收藏库优先、其次素材库文件名（长名优先，避免短名抢匹配）
+  const refsFromText = (text) => {
+    const out = { image: [], video: [], audio: [] };
+    const t = stripVirtualRefs(String(text || ""));
+    const push = (kind, rel) => {
+      if (!rel || !isUsableRel(rel)) return;
+      const cap = kind === "image" ? IMG_CAP : 3;
+      if (!out[kind].includes(rel) && out[kind].length < cap) out[kind].push(rel);
+    };
+    for (const m of t.matchAll(/<\s*(Picture|Subject|Video|Audio)\s*(\d+)\s*>/gi)) {
+      const tag = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+      const n = parseInt(m[2], 10) || 0;
+      const kind = tag === "Audio" ? "audio" : tag === "Video" ? "video" : "image";
+      const bound = assetRegistry.relOfTag(`<${tag} ${n}>`);
+      const f = assetRegistry.fileByIndex(kind, n);
+      push(kind, bound || (f && f.rel) || "");
+    }
+    const names = new Set([
+      ...(assetRegistry.favs || []).map((f) => f.name),
+      ...(assetRegistry.files || []).map((f) => String((f && f.name) || "").replace(/\.[^.]+$/, "")),
+    ].filter(Boolean));
+    for (const nm of [...names].sort((a, b) => b.length - a.length)) {
+      if (!t.includes(nm)) continue;
+      push("image", assetRegistry.relOf(nm));
+    }
+    return out;
+  };
+  // 把"正文里看得见的引用"补进本镜素材槽：幂等（只加不删）、每镜只补一次。
+  // 用户手动挑过的素材不会被覆盖，只是把缺的补上。
+  const mergeTextRefs = (i) => {
+    const c = shotsCfg[i];
+    if (!c || c.__textRefs) return false;
+    // 素材库/收藏库还没加载完 → 先不标记，等 assets 到位后再补（否则会"补了个寂寞"）
+    const hasRegistry = (assetRegistry.files || []).length || (assetRegistry.favs || []).length;
+    const shots = ctx.store.get().shots || [];
+    const text = c.prompt || (shots[i] && shots[i].text) || "";
+    if (!hasRegistry && /<\s*(Picture|Subject|Video|Audio)\s*\d+\s*>/i.test(String(text))) return false;
+    const got = refsFromText(text);
+    let changed = false;
+    for (const k of ["image", "video", "audio"]) {
+      const cap = k === "image" ? IMG_CAP : 3;
+      const arr = c.media[k] || (c.media[k] = []);
+      for (const rel of got[k]) {
+        if (arr.includes(rel)) continue;
+        if (arr.filter(Boolean).length >= cap) break;
+        arr.push(rel);
+        changed = true;
+      }
+    }
+    c.__textRefs = true;
+    return changed;
+  };
 
   const shot = (i) => {
     if (shotsCfg[i]) {
@@ -259,6 +321,7 @@ export function createTimelinePanel(ctx) {
           m.audio = refs0.filter((x) => x && x.kind === "audio" && x.rel).map((x) => x.rel).slice(0, 3);
         }
       }
+      mergeTextRefs(i);     // 正文里看得见的标记/名字 → 补齐到格子（幂等，只加不删）
       return shotsCfg[i];
     }
     // 首次初始化：从 store.refMap[i]（切分时的素材引用）自动导入本镜素材九宫格
@@ -275,6 +338,7 @@ export function createTimelinePanel(ctx) {
       sec: (ctx.store.get().shots || [])[i]?.sec ?? undefined,   // 未设=跟随顶部全局秒（旧包 split 自动时长自动进入）
       linkNext: false,  // 与下一镜衔接（上下文引导）
     };
+    mergeTextRefs(i);     // 首次建立时也补一次（此时素材库可能还没加载完 → 下面 assets 到位后会再试）
     return shotsCfg[i];
   };
   // 本镜秒：全局时长开关开启时统一用 P.output.sec；否则用本镜 sec（未设则跟随全局）
