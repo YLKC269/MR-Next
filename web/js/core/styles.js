@@ -629,6 +629,24 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 .ed-scrubhint { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255,207,107,.5); pointer-events: none; }
 .ed-ruler { touch-action: none; }
 
+/* ---- 首帧/尾帧素材槽（i2v / fl2v / fl2v_tail：素材区只有两个框，对齐旧包 .bd-fl2v-slots）---- */
+.mm-frames { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.mm-frames.one { grid-template-columns: 1fr; }
+.mm-frame { position: relative; min-width: 0; border: 1px dashed #55617a; border-radius: 8px;
+  background: #0d1524; overflow: hidden; cursor: pointer; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 3px; transition: border-color .14s, background .14s; }
+.mm-frame:hover { border-color: var(--gold, #ffcf6b); background: #131f33; }
+.mm-frame.has-img { border-style: solid; border-color: #3a568a; }
+.mm-frame img { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+.mm-frame .ph { color: #7d92b4; font-size: 12px; font-weight: 500; pointer-events: none; }
+.mm-frame .ph2 { color: #5d6f8c; font-size: 10.5px; text-align: center; padding: 0 6px; line-height: 1.4; pointer-events: none; }
+.mm-frame .tag { position: absolute; top: 4px; left: 4px; z-index: 2; padding: 1px 6px; border-radius: 4px;
+  font-size: 10px; font-weight: 700; color: #06202f; pointer-events: none; }
+.mm-frame .x { position: absolute; top: 3px; right: 3px; z-index: 3; width: 20px; height: 20px;
+  border: 0; border-radius: 5px; background: rgba(0,0,0,.8); color: #ff9d9d; font-size: 15px;
+  line-height: 1; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.mm-frame .x:hover { background: #c44; color: #fff; }
+
 /* ---- 生图面板：右侧实时预览（大正方形，宽度自适应填满卡片）---- */
 .gen-preview { position: relative; width: 100%; aspect-ratio: 1/1; min-width: 0; border-radius: 12px;
   background: #000; border: 1px solid #23314a; overflow: hidden; display: flex;

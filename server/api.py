@@ -2548,10 +2548,13 @@ async def h3_shot(req):
         last_frame = None
         refs = None
 
+    # 首尾帧模式让步（对齐旧包语义：首帧必填、尾帧可选）：只填一张时退化成单帧模式出片，
+    # 而不是被一句"需要尾帧图"挡住；退化原因随回执 mode_note 返回给前端。
+    mode, mode_note = h3mod.resolve_frames_mode(mode, first_frame, last_frame)
     if mode in ("i2v", "fl2v") and not first_frame:
-        return _json({"ok": False, "error": f"{mode} 模式需要 first_frame 首帧图（九宫格第1张或分镜匹配命中）"}, status=400)
+        return _json({"ok": False, "error": f"{mode} 模式需要 first_frame 首帧图（时间线素材区「首帧」那一格）"}, status=400)
     if mode in ("fl2v", "fl2v_tail") and not last_frame:
-        return _json({"ok": False, "error": f"{mode} 模式需要 last_frame 尾帧图"}, status=400)
+        return _json({"ok": False, "error": f"{mode} 模式需要 last_frame 尾帧图（时间线素材区「尾帧」那一格）"}, status=400)
     if mode == "r2v" and not refs:
         return _json({"ok": False, "error": "r2v 模式需要至少一张参考图 refs"}, status=400)
 
@@ -2575,6 +2578,7 @@ async def h3_shot(req):
                   "dropped": dropped,
                   "audio_note": audio_note,
                   "accel_note": accel_note,
+                  "mode_note": mode_note,
                   "dialogues": [{"speaker": d.get("speaker") or "", "text": d.get("text") or ""}
                                 for d in (_dialogs or [])],
                   "prompt_final": prompt[:2000]})

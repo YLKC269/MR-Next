@@ -733,6 +733,102 @@ export function createTimelinePanel(ctx) {
       grid);
   };
 
+  // ---------- 首帧 / 尾帧 素材槽（i2v / fl2v / fl2v_tail）----------
+  // 对齐旧包（minimax_fl2v 的 .bd-fl2v-slots 两列槽）：切到「首尾帧生视频」时素材区
+  // **只有两个框**（首帧 / 尾帧），不再给九宫格 —— 这两个槽就是该模式全部的参考图。
+  // 数据仍写进 c.media.image[0] / [1]，与出片 payload 的映射保持一致：
+  //   i2v        → first_frame = 槽0
+  //   fl2v       → first_frame = 槽0，last_frame = 槽1
+  //   fl2v_tail  → last_frame  = 槽0
+  const framesPane = (c, refreshEditor) => {
+    const mode = P.mode;
+    const specs = mode === "i2v"
+      ? [{ slot: 0, tag: "首帧", hint: "必填 · 视频从这张开始", color: "#4fff8f" }]
+      : mode === "fl2v_tail"
+        ? [{ slot: 0, tag: "尾帧", hint: "必填 · 视频结束在这张", color: "#f0a030" }]
+        : [{ slot: 0, tag: "首帧", hint: "必填 · 视频从这张开始", color: "#4fff8f" },
+           { slot: 1, tag: "尾帧", hint: "可选 · 留空则只锁首帧", color: "#f0a030" }];
+    const slots = specs.map((s) => s.slot);
+    const firstEmpty = () => { const k = slots.find((n) => !c.media.image[n]); return k == null ? slots[slots.length - 1] : k; };
+
+    const file = h("input", { type: "file", accept: "image/*", style: { display: "none" } });
+    let upSlot = 0;
+    file.onchange = async () => {
+      const f = file.files && file.files[0]; file.value = "";
+      if (!f) return;
+      try {
+        await ctx.api.upload(folder(), f);
+        c.media.image[upSlot] = (folder() ? folder() + "/" : "") + f.name;
+        c.refsCleared = false;
+        paint(); refreshEditor();
+      } catch (e) { ctx.toast("上传失败: " + e.message, true); }
+    };
+    // 素材库选图：先填第一个空槽，都满了就替换最后一个槽（尾帧优先被替换）
+    const pick = h("select", { class: "select", style: { width: 150, padding: "3px 6px", fontSize: 11.5 } },
+      h("option", { value: "" }, "从素材库选图…"));
+    const fillPick = async () => {
+      const prev = pick.value; clear(pick);
+      pick.appendChild(h("option", { value: "" }, "从素材库选图…"));
+      let pool = [];
+      try { const r = await ctx.api.files(folder(), "image"); pool = (r.files || []).map((f) => (folder() ? folder() + "/" : "") + f.name); } catch (_) {}
+      for (const p of pool) pick.appendChild(h("option", { value: p }, p.split("/").pop()));
+      if (prev && [...pick.options].some((o) => o.value === prev)) pick.value = prev;
+    };
+    pick.onfocus = fillPick;
+    pick.onchange = () => {
+      const rel = pick.value; if (!rel) return;
+      pick.value = "";
+      c.media.image[firstEmpty()] = rel;
+      c.refsCleared = false;
+      paint(); refreshEditor();
+    };
+    const upBtn = h("button", {
+      class: "btn", style: { padding: "3px 8px", fontSize: 11.5 },
+      title: "上传本地图片（首帧优先填空槽）",
+      onclick: () => { upSlot = firstEmpty(); file.click(); },
+    }, "⬆ 上传");
+    const grid = h("div", { class: "mm-frames" + (specs.length === 1 ? " one" : "") });
+    const ar = `${P.output.width || 720} / ${P.output.height || 1280}`;
+    function paint() {
+      clear(grid);
+      for (const sp of specs) {
+        const rel = c.media.image[sp.slot];
+        const box = h("div", {
+          class: "mm-frame" + (rel ? " has-img" : ""),
+          style: { aspectRatio: ar },
+          title: rel ? `${rel}\n（点击替换 · 右上角 × 移除）` : `${sp.tag}：点击上传 / 从素材库选`,
+        });
+        if (rel) {
+          // 缩略图加载失败（源文件被删）→ 隐藏破图，不留裂图占位
+          box.appendChild(h("img", { src: relToViewUrl(rel), onerror: "this.style.display='none'" }));
+          box.appendChild(h("span", { class: "tag", style: { background: sp.color } }, sp.tag));
+          box.appendChild(h("button", {
+            class: "x", title: "移除（清空这一格）",
+            onclick: (ev) => { ev.stopPropagation(); c.media.image[sp.slot] = ""; c.refsCleared = true; paint(); refreshEditor(); },
+          }, "×"));
+          box.onclick = () => { if (!confirm(`替换「${sp.tag}」？`)) return; upSlot = sp.slot; file.click(); };
+        } else {
+          box.appendChild(h("div", { class: "ph" }, `＋ ${sp.tag}`));
+          box.appendChild(h("div", { class: "ph2" }, sp.hint));
+          box.onclick = () => { upSlot = sp.slot; file.click(); };
+        }
+        grid.appendChild(box);
+      }
+    }
+    paint();
+    const filled = specs.filter((s) => c.media.image[s.slot]).length;
+    return h("div", { class: "col", style: { gap: 5 } },
+      h("div", { class: "row", style: { gap: 6 } },
+        h("b", { style: { fontSize: 12 } }, specs.length === 2 ? "首帧 / 尾帧" : specs[0].tag),
+        h("span", { class: "mm-cap" }, `${filled}/${specs.length}`),
+        h("div", { class: "mx-spacer" }), pick, upBtn),
+      grid,
+      h("div", { class: "muted", style: { fontSize: 10.5, lineHeight: 1.5 } },
+        mode === "fl2v"
+          ? "两侧框就是本模式全部参考图：首帧必填；只填尾帧会自动按「尾帧生视频」出，只填首帧按「首帧生视频」出。"
+          : mode === "i2v" ? "本模式只用首帧（尾帧/参考图不参与）。" : "本模式只用尾帧（首帧/参考图不参与）。"));
+  };
+
   // ---------- 视频/音频 3 格小格子 ----------
   const subSlot = (c, slot, refreshEditor) => {
     const grid = h("div", { class: "mm-grid" });
@@ -784,16 +880,21 @@ export function createTimelinePanel(ctx) {
     // t2v（文生视频）是纯文字模式：没有首帧/尾帧/参考图，也不吃音视素材 → 不渲染素材栏，
     // 让提示词输入框占满整行（避免留一排空九宫格误导用户去"加图"）。
     const isT2V = P.mode === "t2v";
+    // 首帧/尾帧一族（i2v / fl2v / fl2v_tail）：素材区**只有首帧+尾帧两个框**（对齐旧包），
+    // 不给九宫格、也不给视频/音频小格 —— 这些素材本模式一概不用，留着只会让人以为"还能加"。
+    const isFrames = P.mode === "i2v" || P.mode === "fl2v" || P.mode === "fl2v_tail";
     const mediaPane = isT2V ? null : h("div", { class: "mm-media" },
-      imageGrid(c, refreshEditor),
-      h("div", { class: "mm-vasub" },
+      isFrames ? framesPane(c, refreshEditor) : imageGrid(c, refreshEditor),
+      isFrames ? null : h("div", { class: "mm-vasub" },
         h("div", { style: { flex: "0 0 auto" } }, subSlot(c, { kind: "video", label: "视频", cap: 3, accept: "video/*" }, refreshEditor)),
         h("div", { style: { flex: "0 0 auto" } }, subSlot(c, { kind: "audio", label: "音频", cap: 3, accept: "audio/*" }, refreshEditor))));
     const promptPane = h("div", { class: "mm-prompt" },
       h("div", { class: "row", style: { gap: 6 } }, h("b", { style: { fontSize: 12 } }, "提示词"),
         h("span", { class: "muted", style: { fontSize: 10.5 } }, isT2V
           ? "（文生视频模式：无素材输入，只写提示词；切到 I2V / FL2V / R2V 才需要素材图）"
-          : "（@收藏名 高亮为素材标记）")),
+          : isFrames
+            ? `（${modeLabel(P.mode)}：素材只看左边${P.mode === "fl2v" ? "首/尾帧两格" : "那一个框"}）`
+            : "（@收藏名 高亮为素材标记）")),
       mention);
     // ---------- 实时预览框：固定正方形，定死在提示词文本区右侧，永远存在、尺寸恒定 ----------
     // 生成中 → 采样预览图；出片后 → 视频（播放/暂停 + manual 二采）；空闲 → 占位文字。
@@ -1031,6 +1132,26 @@ export function createTimelinePanel(ctx) {
       return rels.filter((x) => !miss.includes(x));
     } catch (_) { return rels; }
   };
+  // 首帧/尾帧模式的幽灵剔除：只把失效槽"置空"，绝不压缩数组 ——
+  // 压缩会让"只填尾帧"顶到第 1 格，被当成首帧用（mode/payload 语义就串了）。
+  const dropGhostsFrames = async (frames, i) => {
+    const list = (frames || []).filter(Boolean);
+    if (!list.length) return frames;
+    try {
+      const r = await ctx.api.mediaExists(list);
+      const miss = (r && r.missing) || [];
+      if (!miss.length) return frames;
+      const missSet = new Set(miss);
+      const c = shot(i);
+      const imgs = c.media.image || [];
+      for (let k = 0; k < imgs.length; k++) if (imgs[k] && missSet.has(imgs[k])) imgs[k] = "";
+      const rm = ctx.store.get().refMap || [];
+      if (Array.isArray(rm[i])) rm[i] = rm[i].filter((m) => !missSet.has(m.rel));
+      println(`⚠ 已剔除 ${miss.length} 个失效素材（源文件已不存在）：${miss.slice(0, 3).join(" · ")}${miss.length > 3 ? " …" : ""}`, "#ffd98f");
+      renderEditor();
+      return frames.map((x) => (x && missSet.has(x) ? "" : x));
+    } catch (_) { return frames; }
+  };
   const runOne = async (i) => {
     // 注意：这里不再判断 busy，busy 由调用方（单镜 / 整条 / 选中）管理，
     // 避免「整条连跑」先 set busy=true 再调 runOne 导致每镜都误判为冲突。
@@ -1039,6 +1160,7 @@ export function createTimelinePanel(ctx) {
     const c = shot(i);
     // 素材：优先九宫格手动图；为空则回退到「分镜面板」匹配命中的资产图（保证视频与资产图一致）
     // t2v 纯文字模式：完全不取图（连分镜匹配缓存也不回退），保证构图里没有任何图片输入。
+    const isFramesMode = P.mode === "i2v" || P.mode === "fl2v" || P.mode === "fl2v_tail";
     let imgs = P.mode === "t2v" ? [] : c.media.image.slice();
     // 只有"从未手动清理过"才回退到分镜匹配缓存；用户在九宫格清空过（refsCleared）
     // 就说明不想再用这批参考图，切到其它模式时不能再被旧缓存图带回来。
@@ -1049,21 +1171,40 @@ export function createTimelinePanel(ctx) {
     // 脏 rel 过滤：虚拟引用 token（@image#1:xxx.png）不是真实文件，绝不能进 payload
     imgs = imgs.filter((x) => isUsableRel(x));
     if (imgs.length) imgs = await dropGhosts(imgs, i);
+    // 首帧/尾帧模式：槽位语义必须**保序**（槽0=首帧、槽1=尾帧），不能像九宫格那样压缩。
+    // 否则"只填尾帧"会被挤到第 1 格当成首帧，i2v/fl2v/fl2v_tail 三种模式全串。
+    let frames = null;
+    if (isFramesMode) {
+      const raw = (c.media.image || []).slice(0, 2);
+      frames = [isUsableRel(raw[0]) ? raw[0] : "", isUsableRel(raw[1]) ? raw[1] : ""];
+      if (!frames[0] && !frames[1] && !c.refsCleared) {
+        const refMap = ctx.store.get().refMap || [];
+        const fb = ((refMap[i] || []).filter((m) => m.rel && m.kind === "image")).map((m) => m.rel);
+        frames = [isUsableRel(fb[0]) ? fb[0] : "", isUsableRel(fb[1]) ? fb[1] : ""];
+      }
+      if (frames[0] || frames[1]) frames = await dropGhostsFrames(frames, i);
+    }
     const sec = effSec(i);
     // 提示词净化：剥掉粘贴图片时残留的 @image#N:xxx.png 虚拟引用 token。
     // 不剥的话它会作为无意义文本混进 prompt（用户反馈「文生视频被污染」的真凶）。
     let text = stripVirtualRefs(c.prompt || sh?.text || "");
     // 素材前置校验：i2v/fl2v/fl2v_tail/r2v 必须有对应素材图，否则后端构图缺必需输入，出片静默失败
+    // 首尾帧一族要**按槽位**判（i2v 只认「首帧」槽、fl2v_tail 只认「尾帧」槽），
+    // 否则"只剩尾帧"会误判成"有图"→ 提交后才被后端 400 打回（白等一轮）。
     const _need = {
-      i2v: "首帧图（九宫格第 1 张，或先跑「分镜匹配」命中资产图）",
-      fl2v: "首帧图 + 尾帧图（九宫格第 1、2 张）",
-      fl2v_tail: "尾帧图（九宫格第 1 张）",
+      i2v: "首帧图（素材区「首帧」那一格）",
+      fl2v: "首帧图或尾帧图（素材区「首帧 / 尾帧」两格至少填一张）",
+      fl2v_tail: "尾帧图（素材区「尾帧」那一格）",
       r2v: "参考图（九宫格至少 1 张，或先跑「分镜匹配」命中资产图）",
     };
     if (_need[P.mode]) {
-      const needN = P.mode === "fl2v" ? 2 : 1;
-      if (imgs.length < needN) {
-        ctx.toast(`${modeLabel(P.mode)} 模式需要 ${_need[P.mode]}，当前 0 张图，无法出片。请先加图或改用 t2v 模式`, true);
+      let ok = imgs.length > 0;
+      if (isFramesMode) {
+        const f0 = (frames && frames[0]) || "", f1 = (frames && frames[1]) || "";
+        ok = P.mode === "fl2v" ? !!(f0 || f1) : !!f0;   // fl2v 留一张也能出（后端自动退化成单帧模式）
+      }
+      if (!ok) {
+        ctx.toast(`${modeLabel(P.mode)} 模式需要 ${_need[P.mode]}，当前没有可用素材图，无法出片。请先加图或改用 t2v 模式`, true);
         println(`✗ 第${sh.index}镜：${modeLabel(P.mode)} 模式缺素材图（需 ${_need[P.mode]}）`, "#ffb4b4");
         return false;
       }
@@ -1076,11 +1217,13 @@ export function createTimelinePanel(ctx) {
     // prefix 同样净化：公共前缀里若残留虚拟引用 token，会拼进每镜提示词造成跨镜头污染
     // index 用于 H3 官方结构的 [Shot N] 编号（与分镜序号一致）
     const payload = { mode: P.mode, prompt: text, prefix: stripVirtualRefs(ctx.store.get().prefix || ""), folder: folder(), seconds: sec, seed: P.output.seed || 0, index: (sh && sh.index) || i + 1, opts: collectOpts() };
-    if (P.mode === "i2v") payload.first_frame = imgs[0] || "";
-    else if (P.mode === "fl2v") { payload.first_frame = imgs[0] || ""; payload.last_frame = imgs[1] || ""; }
-    else if (P.mode === "fl2v_tail") payload.last_frame = imgs[0] || "";
+    if (P.mode === "i2v") payload.first_frame = (frames && frames[0]) || "";
+    else if (P.mode === "fl2v") { payload.first_frame = (frames && frames[0]) || ""; payload.last_frame = (frames && frames[1]) || ""; }
+    else if (P.mode === "fl2v_tail") payload.last_frame = (frames && frames[0]) || "";
     else if (P.mode === "r2v") payload.refs = imgs;
-    println(`▶ 第${sh.index}镜（${modeLabel(P.mode)} · ${sec}s · 图${imgs.length} 视${c.media.video.length} 音${c.media.audio.length}${imgs.length ? "" : " · 无素材(纯文本)"}）`, "#9fd0ff");
+    println(`▶ 第${sh.index}镜（${modeLabel(P.mode)} · ${sec}s · ${isFramesMode
+      ? `首帧${(frames && frames[0]) ? "✓" : "✗"} 尾帧${(frames && frames[1]) ? "✓" : "✗"}`
+      : `图${imgs.length} 视${c.media.video.length} 音${c.media.audio.length}`}${(!isFramesMode && !imgs.length) ? " · 无素材(纯文本)" : ""}）`, "#9fd0ff");
     // 生成中实时预览：低频轮询采样 preview 图（不占资源）
     // 关键：带本次起始时间戳，只认"本次开始之后写盘"的预览图 —— 否则会把上一轮（甚至别的
     // 模式 / 别的镜）留在预览目录里的旧图当成"本次实时预览"显示，看起来就像"还在用以前的参考图"。
@@ -1104,6 +1247,8 @@ export function createTimelinePanel(ctx) {
         if (r.audio_note) println(`⚠ ${r.audio_note}`, "#ffb35c");
         // 外部加速节点回执：告诉用户"内置加速为什么没生效"（外接加速后自动让路）
         if (r.accel_note) println(`🔗 ${r.accel_note}`, "#9fd0ff");
+        // 首尾帧让步回执：fl2v 只填了一张时后端会退化成 i2v / fl2v_tail，这里说明清楚
+        if (r.mode_note) println(`🎬 ${r.mode_note}`, "#ffd98f");
         // 回显真正送进模型的最终提示词：用户怀疑「不按提示词走」时能一眼核对是不是这里被改过
         if (r.prompt_final) {
           const pf = String(r.prompt_final).replace(/\s+/g, " ").trim();

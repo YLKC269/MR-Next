@@ -392,6 +392,24 @@ def _base_loaders(g, seq, nodes, opts):
     return model_node, c, vv, av
 
 
+def resolve_frames_mode(mode, first_frame=None, last_frame=None):
+    """首尾帧模式让步（对齐旧包语义：首帧必填、尾帧可选）。
+
+    只填一张时不报错，而是退化成单帧模式，保证"少填一张也能出片"：
+      fl2v + 只有首帧 → i2v（首帧生视频）
+      fl2v + 只有尾帧 → fl2v_tail（尾帧生视频）
+    返回 (effective_mode, note)。note 为空串表示没有让步。
+    """
+    m = str(mode or "")
+    if m != "fl2v":
+        return m, ""
+    if first_frame and not last_frame:
+        return "i2v", "未提供尾帧图 → 已自动按「首帧生视频 I2V」出片（补上尾帧则会用 FL2V 首尾帧构图）"
+    if last_frame and not first_frame:
+        return "fl2v_tail", "未提供首帧图 → 已自动按「尾帧生视频 L2V」出片（补上首帧则会用 FL2V 首尾帧构图）"
+    return m, ""
+
+
 def _frame_count(seconds, fps=24.0):
     fc = max(5, int(round(float(seconds) * fps)))
     while fc % 17 != 5:
