@@ -267,8 +267,7 @@ export async function pickAssetFolder(ctx, title) {
   return { folder: pn.split("\\").filter(Boolean).pop() || "" };
 }
 
-/* 就地改名：把显示名字的元素（如素材卡的 .mn / 收藏卡的 .mn）临时换成输入框。
- *   Enter / 失焦 = 提交；Esc = 取消。onCommit(newName) 由调用方负责调后端 + 刷新。
+/* 就地改名：把显示名字的元素（如素材卡的 .mn / 收藏卡的 .mn）临时换成输入框。 *   Enter / 失焦 = 提交；Esc = 取消。onCommit(newName) 由调用方负责调后端 + 刷新。
  * 返回 true 表示已进入编辑态（同一元素同时只允许一个编辑框）。
  * 注意：输入框内 stopPropagation —— 否则卡片自身的 pointerdown 拖拽换位、
  * 画布层/全局快捷键（空格、Delete、Ctrl+Z）会在打字时被触发。 */
@@ -306,4 +305,66 @@ export function inlineRename(labelEl, initial, onCommit) {
   inp.addEventListener("blur", () => finish(true));
   setTimeout(() => { try { inp.focus(); inp.select(); } catch (_) {} }, 0);
   return true;
+}
+
+/* 右键菜单（资产卡专用）：挂在 body 上的轻量浮层。
+ * items: [{ icon, label, hint, danger, disabled, onClick }]
+ * 关闭时机：点空白 / Esc / 滚动 / 再次右键 —— 用 closed 守卫防止 pointerdown 与 click 顺序打架。 */
+let _ctxEl = null;
+export function closeContextMenu() {
+  if (_ctxEl) { try { _ctxEl.remove(); } catch (_) {} _ctxEl = null; }
+}
+export function contextMenu(clientX, clientY, items = []) {
+  closeContextMenu();
+  if (!items.length) return null;
+  const menu = document.createElement("div");
+  menu.className = "mx-ctxmenu";
+  for (const it of items) {
+    if (!it) continue;
+    if (it.divider) { menu.appendChild(document.createElement("div")).className = "mx-ctxmenu-sep"; continue; }
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "mx-ctxmenu-item" + (it.danger ? " danger" : "");
+    b.title = it.hint || "";
+    if (it.disabled) b.disabled = true;
+    b.innerHTML = "";
+    const ic = document.createElement("span"); ic.className = "ic"; ic.textContent = it.icon || "";
+    const tx = document.createElement("span"); tx.className = "tx"; tx.textContent = it.label || "";
+    b.append(ic, tx);
+    if (it.hint) { const hh = document.createElement("span"); hh.className = "hint"; hh.textContent = it.hint; b.appendChild(hh); }
+    b.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      closeContextMenu();
+      try { it.onClick && it.onClick(); } catch (err) { console.error("[mx] ctx menu action failed", err); }
+    });
+    menu.appendChild(b);
+  }
+  document.body.appendChild(menu);
+  // 视口边界收敛（右下角右键时不至于跑出屏幕）
+  const r = menu.getBoundingClientRect();
+  const x = Math.max(4, Math.min(clientX, (window.innerWidth || 1200) - r.width - 6));
+  const y = Math.max(4, Math.min(clientY, (window.innerHeight || 800) - r.height - 6));
+  menu.style.left = x + "px";
+  menu.style.top = y + "px";
+  _ctxEl = menu;
+
+  let closed = false;
+  const close = () => { if (closed) return; closed = true; closeContextMenu(); off(); };
+  const onDown = (e) => { if (menu.contains(e.target)) return; close(); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const off = () => {
+    document.removeEventListener("pointerdown", onDown, true);
+    document.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("scroll", close, true);
+    window.removeEventListener("resize", close, true);
+    window.removeEventListener("contextmenu", close, true);
+  };
+  setTimeout(() => {
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close, true);
+    window.addEventListener("contextmenu", close, true);
+  }, 0);
+  return menu;
 }

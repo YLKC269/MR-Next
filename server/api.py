@@ -2214,6 +2214,139 @@ async def studio_read_text_file(req):
     return _json({"ok": True, "name": os.path.basename(path), "text": text})
 
 
+# 导出到本地文件夹时的分类子目录名（右键「保存到本地文件夹」用）
+_ASSET_CAT_DIR = {
+    "role": "角色", "scene": "场景", "asset": "素材", "audio": "音频",
+    "image": "素材", "video": "素材", "other": "素材", "music": "音频",
+}
+
+
+def _asset_cat_dir(cat):
+    c = str(cat or "").strip().lower()
+    return _ASSET_CAT_DIR.get(c, "素材")
+
+
+async def studio_save_asset(req):
+    """POST /mrnext/studio/save_asset —— 把资产另存到用户选定的本地文件夹（按分类建子目录）。
+
+    body: {rel: "mrboard_next/林晚.png", dir: "D:/短剧/我的素材", category?: "role", name?: "林晚"}
+    - 分类缺省时：先看这个 rel 在收藏库里属于哪一类（role/scene/asset/audio），
+      没收藏过就按扩展名归类（音频 → 音频，其余 → 素材）；
+    - 目标已存在同名文件时自动加 _2 / _3，绝不覆盖本地文件；
+    - 返回最终落盘绝对路径，面板会 toast 出来（并可「在文件夹中显示」）。
+    """
+    body = await req.json()
+    rel = str(body.get("rel") or "").strip().replace("\\", "/")
+    out_dir = str(body.get("dir") or "").strip().strip('"')
+    if not rel:
+        return _json({"error": "缺少 rel"}, status=400)
+    if not out_dir:
+        return _json({"error": "还没选择保存路径（先点「📁 保存路径」）"}, status=400)
+    out_dir = os.path.abspath(os.path.expanduser(out_dir))
+    if not os.path.isdir(out_dir):
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            return _json({"error": f"保存路径不可用: {exc}"}, status=400)
+
+    base = _input_base()
+    try:
+        src = _safe_join(base, rel)
+    except (ValueError, OSError) as exc:
+        return _json({"error": f"路径不合法: {exc}"}, status=400)
+    if not os.path.isfile(src):
+        return _json({"error": "文件不存在（可能已被删除或改名）: " + rel}, status=404)
+
+    cat = str(body.get("category") or "").strip()
+    if not cat:
+        try:
+            for it in favmod.list_items():
+                if str(it.get("rel") or "") == rel:
+                    cat = str(it.get("category") or "")
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+    if not cat:
+        cat = "audio" if os.path.splitext(src)[1].lower() in _KIND_EXTS.get("audio", set()) else "asset"
+    sub = _asset_cat_dir(cat)
+    dest_dir = os.path.join(out_dir, sub)
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        return _json({"error": f"无法创建分类目录: {exc}"}, status=500)
+
+    src_name = os.path.basename(src)
+    want = _safe_asset_name(str(body.get("name") or "").strip() or os.path.splitext(src_name)[0])
+    ext = os.path.splitext(src_name)[1]
+    cand, i = want + ext, 1
+    while os.path.exists(os.path.join(dest_dir, cand)):
+        # 同名且同大小 → 认为已经导出过，直接返回（重复点右键不产生 _2 _3）
+        try:
+            if os.path.getsize(os.path.join(dest_dir, cand)) == os.path.getsize(src):
+                return _json({"ok": True, "path": os.path.join(dest_dir, cand), "category": cat,
+                              "dir": os.path.join(out_dir, sub), "existed": True})
+        except OSError:
+            pass
+        i += 1
+        cand = f"{want}_{i}{ext}"
+    dst = os.path.join(dest_dir, cand)
+    try:
+        shutil.copy2(src, dst)
+    except Exception as exc:  # noqa: BLE001
+        return _json({"error": f"保存失败: {exc}"}, status=500)
+    return _json({"ok": True, "path": dst, "category": cat, "dir": dest_dir, "existed": False})
+
+
+async def studio_reveal(req):
+    """POST /mrnext/studio/reveal —— 在系统文件管理器里定位一个文件/文件夹。
+
+    body: {path?: "D:/x/y.png"} 或 {rel: "mrboard_next/y.png"}
+    """
+    body = await req.json()
+    p = str(body.get("path") or "").strip().strip('"')
+    if not p and body.get("rel"):
+        try:
+            p = _safe_join(_input_base(), str(body.get("rel")).replace("\\", "/"))
+        except (ValueError, OSError):
+            p = ""
+    if not p:
+        return _json({"error": "缺少 path 或 rel"}, status=400)
+    p = os.path.abspath(os.path.expanduser(p))
+    if not os.path.exists(p):
+        # 文件被删了 → 退而定位它的父目录（父目录也没了就报错）
+        parent = os.path.dirname(p)
+        if not os.path.isdir(parent):
+            return _json({"error": "路径不存在: " + p}, status=404)
+        p = parent
+    try:
+        if os.name == "nt":
+            if os.path.isfile(p):
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(p)])
+            else:
+                subprocess.Popen(["explorer", os.path.normpath(p)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R" if os.path.isfile(p) else "", p])
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(p) if os.path.isfile(p) else p])
+    except Exception as exc:  # noqa: BLE001
+        return _json({"error": f"打开失败: {exc}"}, status=500)
+    return _json({"ok": True, "path": p})
+
+
+async def media_purge_thumbs(req):
+    """POST /mrnext/media/purge_thumbs —— 清掉指定 rel 的缩略图缓存。
+
+    本地把文件删了/改名了之后，前端检测到列表少了这些 rel，就调它把缩略图缓存一起清掉，
+    避免"素材没了但缩略图还挂在那儿"。
+    """
+    try:
+        body = await req.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    rels = [str(x) for x in (body.get("rels") or []) if x]
+    return _json({"ok": True, "purged": _purge_thumb_cache(rels), "count": len(rels)})
+
+
 async def studio_import_folder(req):
     """递归扫描本地文件夹，把图片/音频/视频拷入资产文件夹（重名同尺寸跳过）。"""
     body = await req.json()
@@ -3283,6 +3416,7 @@ ROUTES = [
     ("GET", "/mrnext/editor/videos", editor_videos),
     ("GET", "/mrnext/editor/probe", editor_probe),
     ("POST", "/mrnext/media/exists", media_exists),
+    ("POST", "/mrnext/media/purge_thumbs", media_purge_thumbs),
     ("GET", "/mrnext/editor/thumb", editor_thumb),
     ("GET", "/mrnext/editor/options", editor_options),
     ("POST", "/mrnext/editor/compose", editor_compose),
@@ -3305,6 +3439,8 @@ ROUTES = [
     ("POST", "/mrnext/studio/native_pick", studio_native_pick),
     ("POST", "/mrnext/studio/read_text_file", studio_read_text_file),
     ("POST", "/mrnext/studio/import_folder", studio_import_folder),
+    ("POST", "/mrnext/studio/save_asset", studio_save_asset),
+    ("POST", "/mrnext/studio/reveal", studio_reveal),
     ("POST", "/mrnext/studio/analyze", studio_analyze),
     ("POST", "/mrnext/studio/delete_files", studio_delete_files),
     ("POST", "/mrnext/studio/clear_folder", studio_clear_folder),

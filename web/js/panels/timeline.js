@@ -233,7 +233,21 @@ export function createTimelinePanel(ctx) {
   });
 
   const shot = (i) => {
-    if (shotsCfg[i]) return shotsCfg[i];
+    if (shotsCfg[i]) {
+      // 兜底自动补：本镜素材区还空着、而 store.refMap[i] 已有引用（例如方案写入晚于本镜缓存建立）
+      // → 按 refMap 补进来。只在"空着"时补，用户手动挑过的素材绝不会被覆盖。
+      const refs0 = (ctx.store.get().refMap || [])[i];
+      if (Array.isArray(refs0) && refs0.length) {
+        const m = shotsCfg[i].media || (shotsCfg[i].media = { image: [], video: [], audio: [] });
+        const empty = !((m.image || []).length + (m.video || []).length + (m.audio || []).length);
+        if (empty) {
+          m.image = refs0.filter((x) => x && x.kind === "image" && x.rel).map((x) => x.rel).slice(0, IMG_CAP);
+          m.video = refs0.filter((x) => x && x.kind === "video" && x.rel).map((x) => x.rel).slice(0, 3);
+          m.audio = refs0.filter((x) => x && x.kind === "audio" && x.rel).map((x) => x.rel).slice(0, 3);
+        }
+      }
+      return shotsCfg[i];
+    }
     // 首次初始化：从 store.refMap[i]（切分时的素材引用）自动导入本镜素材九宫格
     const refMap = ctx.store.get().refMap || [];
     const refs = Array.isArray(refMap[i]) ? refMap[i] : [];
@@ -1344,7 +1358,19 @@ export function createTimelinePanel(ctx) {
     else if (shots.length) { selIdx = 0; editorHost.appendChild(editorFor(0, shots[0])); }
     else editorHost.appendChild(h("div", { class: "empty" }, "点「＋ 分镜」开始在轨道上加镜头块"));
   };
-  const renderAll = () => { renderTrack(); renderEditor(); };
+  // 分镜方案变更（拆分分镜 / 匹配引用 / 切分到导演台）→ 丢掉旧的每镜缓存，重新从 refMap 导入。
+  // ⚠ 没有这一步的话：用户先打开过时间线（此时 shotsCfg[i] 已按"空 refMap"建好并被永久缓存），
+  //   之后再切分到导演台时，本镜素材区仍然是空的 —— 表现就是"切分后素材不自动加载"。
+  let _lastSplitStamp = null;
+  const syncPlanStamp = () => {
+    const stamp = ctx.store.get().splitStamp;
+    if (_lastSplitStamp === null) { _lastSplitStamp = stamp; return; }
+    if (stamp === _lastSplitStamp) return;
+    _lastSplitStamp = stamp;
+    Object.keys(shotsCfg).forEach((k) => delete shotsCfg[k]);   // 方案换了 → 每镜缓存作废
+  };
+
+  const renderAll = () => { syncPlanStamp(); renderTrack(); renderEditor(); };
   const toggleLog = () => {
     logOpen = !logOpen;
     logBar.classList.toggle("tl-log-open", logOpen);

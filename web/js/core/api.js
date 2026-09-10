@@ -122,6 +122,12 @@ export const StudioAPI = {
   paths: () => fetch("/mrnext/studio/paths").then((r) => r.json()),
   readLocalText: (path) => postJson("/mrnext/studio/read_text_file", { path }),
   importFolder: (folder, target) => postJson("/mrnext/studio/import_folder", { folder, target }),
+  // 资产另存到用户选的本地文件夹（后端按分类建子目录：角色/场景/素材/音频）
+  saveAsset: (payload) => postJson("/mrnext/studio/save_asset", payload),
+  // 在系统文件管理器里定位文件（rel 或绝对 path）
+  reveal: (payload) => postJson("/mrnext/studio/reveal", payload),
+  // 本地文件被删/改名后，清掉它对应的缩略图缓存
+  purgeThumbs: (rels) => postJson("/mrnext/media/purge_thumbs", { rels }),
   deleteFiles: (folder, names) => postJson("/mrnext/studio/delete_files", { folder, names }),
   clearFolder: (folder) => postJson("/mrnext/studio/clear_folder", { folder }),
   clearMaterials: (folder) => postJson("/mrnext/editor/clear_materials", { folder }),

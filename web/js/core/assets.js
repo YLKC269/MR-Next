@@ -159,6 +159,10 @@ function reindexByKind(arr) {
   return arr;
 }
 
+// 上一轮已知的 rel 集合：本轮消失的那些 = 本地被删/改名 → 顺手清掉它们的缩略图缓存，
+// 避免"素材已经没了，缩略图还挂在面板上"。
+let _knownRels = null;
+
 async function refresh(f) {
   // 无参时优先读 store.folder（用户可能换过保存文件夹），避免素材库停留在旧 folder 的过期列表
   let f0 = f;
@@ -186,6 +190,20 @@ async function refresh(f) {
       console.warn(`[MRBoardNext] 已过滤 ${droppedFiles} 个脏素材 / ${droppedFavs} 个脏收藏（虚拟引用 token）`);
     }
   } catch (e) { console.warn("[MRBoardNext] asset refresh failed, keep stale:", e); /* 保留旧值 */ }
+
+  // 本地删除/改名检测：与上一轮比对，消失的 rel 通知后端清缩略图缓存（失败不影响主流程）
+  try {
+    const nowRels = new Set([...favs.map((x) => x.rel), ...files.map((x) => x.rel)].filter(Boolean));
+    if (_knownRels && _knownRels.size) {
+      const gone = [..._knownRels].filter((r) => !nowRels.has(r));
+      if (gone.length) {
+        console.info(`[MRBoardNext] 检测到 ${gone.length} 个素材已从磁盘消失，清理缩略图缓存`);
+        StudioAPI.purgeThumbs(gone).catch(() => {});
+      }
+    }
+    _knownRels = nowRels;
+  } catch (_) {}
+
   subs.forEach((fn) => { try { fn(); } catch (_) {} });
   return { favs, files };
 }

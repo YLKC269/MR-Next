@@ -162,7 +162,8 @@ export function createShotsPanel(ctx) {
       try {
         // 确保每镜 sec 都有值（默认 5s）
         const normalized = shots.map((sh) => ({ ...sh, sec: Number.isFinite(sh.sec) && sh.sec > 0 ? sh.sec : 5 }));
-        s.set({ shots: normalized });
+        // splitStamp：时间线收到后会丢掉旧的每镜缓存 → 按 store.refMap 重新自动导入本镜素材
+        s.set({ shots: normalized, splitStamp: Date.now() });
         await ctx.api.savePlan(s.get().folder || "mrboard_next", normalized);
         ctx.toast(`✓ 已切分 ${normalized.length} 镜到导演台（落盘 _plan.json）`);
         ctx.switchTo("timeline");
@@ -368,7 +369,8 @@ export function createShotsPanel(ctx) {
             shots.map((sh) => sh.text || ""),
             cands
           );
-          s.set({ refMap: res.perShot || [] });
+          // 重新匹配了引用 → 也属于"分镜方案变了"，时间线要按新 refMap 重新自动导入素材
+          s.set({ refMap: res.perShot || [], splitStamp: Date.now() });
           ctx.toast(`匹配完成：命中 ${(res.used || []).length} 个素材（${(res.perShot || []).length} 镜）`);
           render();
         } catch (e) {

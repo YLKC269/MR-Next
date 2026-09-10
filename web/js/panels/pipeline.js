@@ -145,7 +145,7 @@ export function createPipelinePanel(ctx) {
             durationSec: Number(secIn.value) || 5,
           });
           if (isCancelled()) return;
-          s.set({ shots: sp.shots });
+          s.set({ shots: sp.shots, refMap: sp.perShot || [], splitStamp: Date.now() });
           // header 自动并入 prefix
           if (sp.header && !prefix) {
             s.set({ prefix: sp.header });

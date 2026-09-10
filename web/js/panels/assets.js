@@ -2,8 +2,9 @@
 // v1.2 UI：kind tab + 缩略卡（hover 收藏按钮/删除勾选 + 拖拽换位）+ 灯箱预览 + 右上角悬浮「收藏入库」面板
 import { h, clear } from "../core/dom.js";
 import { viewUrl, relToViewUrl } from "../core/api.js";
-import { lightbox, inlineRename } from "../core/ui.js";
+import { lightbox, inlineRename, contextMenu, closeContextMenu } from "../core/ui.js";
 import { assetRegistry } from "../core/assets.js";
+import { assetDirRow, saveAssetHere, revealRel, startAssetWatch, CAT_CN } from "../core/asset_io.js";
 
 const ORDER_LS_PREFIX = "mrnext.assets.order.v1."; // + `${folder}::${kind}`
 
@@ -37,6 +38,11 @@ export function createAssetsPanel(ctx) {
   const grid = h("div", { class: "grid cols-auto", style: { gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))" } });
   const statusLbl = h("span", { class: "muted" });
   const folderIn = h("input", { class: "input", value: ctx.store.get().folder || "mrboard_next", placeholder: "资产文件夹", style: { width: 190, padding: "6px 10px" } });
+  // 「📁 保存路径」一行：选本地导出目录 + 一键把该目录里的素材导回（导入即可被引用）
+  const dirRow = assetDirRow(ctx, {
+    onChanged: () => renderToolbar(),
+    onImported: () => { refresh(); renderToolbar(); },
+  });
   let curKind = "all";
   let files = [];
   // 勾选集合：同时服务于「批量删除」和「批量收藏」
@@ -220,8 +226,33 @@ export function createAssetsPanel(ctx) {
         } }, "✎");
         card.appendChild(h("div", { class: "act" }, favB, renameB));
         // 提示拖拽
-        card.title = `${f.name}\n（拖拽可换位 · 勾选可批量删除/收藏）`;
+        card.title = `${f.name}\n（拖拽可换位 · 勾选可批量删除/收藏 · 右键可保存到本地文件夹）`;
         card.onclick = () => { curPick = { name: f.name, rel, kind: f.kind }; renderFavBar(); if (f.kind !== "audio") lightbox(url, f.kind); };
+        // 右键菜单：保存到本地文件夹（按分类）/ 在文件夹中显示 / 重命名 / 收藏 / 删除
+        card.oncontextmenu = (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          const fav = (assetRegistry.favs || []).find((x) => x.rel === rel);
+          const cat = (fav && fav.category) || (f.kind === "audio" ? "audio" : "asset");
+          contextMenu(ev.clientX, ev.clientY, [
+            { icon: "⬇", label: "保存到本地文件夹（自动分类）", hint: CAT_CN[cat] || "素材",
+              onClick: () => saveAssetHere(ctx, rel, "") },
+            { icon: "📂", label: "在文件夹中显示", onClick: () => revealRel(ctx, rel) },
+            { divider: true },
+            { icon: "✎", label: "重命名文件", onClick: () => {
+              const nameEl = card.querySelector(".mn");
+              if (nameEl) nameEl.classList.add("editing");
+              inlineRename(nameEl, f.name.replace(/\.[^.]+$/, ""), (v) => doRenameFile(f, rel, v));
+            } },
+            { icon: "★", label: fav ? "已在收藏库（改分类/名称）" : "收藏此素材", hint: fav ? (CAT_CN[fav.category] || fav.category) : "",
+              onClick: () => { curPick = { name: f.name, rel, kind: f.kind }; renderFavBar(); if (!favOpen) toggleFav(true); } },
+            { divider: true },
+            { icon: "🗑", label: "删除这个文件", danger: true, onClick: async () => {
+              if (!confirm(`删除素材文件「${f.name}」？（不可恢复）`)) return;
+              try { const r = await ctx.api.deleteFiles(folderIn.value.trim(), [f.name]); ctx.toast(`已删除 ${r.count} 个`); selSet.delete(f.name); await assetRegistry.refresh(); refresh(); renderToolbar(); }
+              catch (e) { ctx.toast("删除失败: " + e.message, true); }
+            } },
+          ]);
+        };
         // 拖拽换位（pointer 模式，见 skill §2）：动 >6px 触发；排除 .abtn / .ck / input
         attachDragReorder(card, f);
         grid.appendChild(card);
@@ -412,7 +443,7 @@ export function createAssetsPanel(ctx) {
   // 把收藏浮层挂载到 body（脱离滚动容器），每次点击按钮时重新定位
   mountFavPanel();
 
-  const el = h("div", { class: "col as-panel" }, toolbar, grid);
+  const el = h("div", { class: "col as-panel" }, toolbar, dirRow, grid);
   // 把 pointermove/up 监听挂到承载 grid 的 shadow root（事件不逃出 shadow，要就地监听）
   // 注意：面板可能被多次创建（如切走/切回），先移除旧 listener 防重入
   const _root = el.getRootNode();
@@ -423,5 +454,11 @@ export function createAssetsPanel(ctx) {
   refresh(); renderToolbar();
   // 其它面板改过素材（收藏库改名 / 剪辑删素材 / 时间线出片）→ 本面板实时重扫，不切走也能看到
   assetRegistry.subscribe(() => { if (el.isConnected) refresh(); });
-  return { el, update: () => { if (favOpen) positionFavSel(); refresh(); } };
+  // 本地删除/新增实时检测：定时重读（消失的素材会从列表里掉出去，缩略图缓存也被清）
+  const stopWatch = startAssetWatch(ctx, () => { refresh(); renderToolbar(); }, { active: () => el.isConnected });
+  return {
+    el,
+    update: () => { if (favOpen) positionFavSel(); dirRow.refreshDir && dirRow.refreshDir(); refresh(); renderToolbar(); },
+    stop: () => { try { stopWatch(); } catch (_) {} closeContextMenu(); },
+  };
 }

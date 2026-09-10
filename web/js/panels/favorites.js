@@ -2,8 +2,9 @@
 // v1.1 UI：分类计数 tab + 1:1 缩略卡（分类色边/渐变遮罩）+ hover 操作 + 灯箱预览
 import { h, clear } from "../core/dom.js";
 import { relToViewUrl } from "../core/api.js";
-import { lightbox, inlineRename } from "../core/ui.js";
+import { lightbox, inlineRename, contextMenu, closeContextMenu } from "../core/ui.js";
 import { assetRegistry } from "../core/assets.js";
+import { assetDirRow, saveAssetHere, revealRel, startAssetWatch, missingOf, CAT_CN } from "../core/asset_io.js";
 
 export function createFavoritesPanel(ctx) {
   const tabs = h("div", { class: "pstrip" });
@@ -13,6 +14,21 @@ export function createFavoritesPanel(ctx) {
   let curCat = "all";
   let search = "";
   const delIds = new Set();
+  const goneRels = new Set();   // 本地已被删除的 rel（卡片打标 + 一键清理）
+  const dirRow = assetDirRow(ctx, {
+    onImported: () => { load(); },
+    extra: [h("button", {
+      class: "btn", style: { padding: "6px 11px" },
+      title: "把「文件已丢失」的收藏条目一次性移出收藏库（本地文件被删/改名后出现）",
+      onclick: async () => {
+        if (!goneRels.size) { ctx.toast("没有失效收藏"); return; }
+        if (!confirm(`移出 ${goneRels.size} 条「文件已丢失」的收藏？`)) return;
+        const dead = items.filter((i) => goneRels.has(i.rel)).map((i) => i.id);
+        try { await ctx.api.favoriteRemove({ ids: dead }); ctx.toast(`已清理 ${dead.length} 条失效收藏`); await load(); }
+        catch (e) { ctx.toast("清理失败: " + e.message, true); }
+      },
+    }, "🧹 清理失效收藏")],
+  });
 
   const CATS = [
     { key: "all", label: "★ 全部" },
@@ -46,8 +62,9 @@ export function createFavoritesPanel(ctx) {
       return;
     }
     for (const it of shown) {
-      const cls = "mcard " + (CAT_LABEL_CLS(it.category));
-      const card = h("div", { class: cls, dataset: { id: it.id, rel: it.rel }, title: it.rel });
+      const gone = goneRels.has(it.rel);
+      const cls = "mcard " + (CAT_LABEL_CLS(it.category)) + (gone ? " gone" : "");
+      const card = h("div", { class: cls, dataset: { id: it.id, rel: it.rel }, title: gone ? `文件已丢失：${it.rel}` : it.rel });
       const url = relToViewUrl(it.rel);
       if (it.kind === "image" && url) {
         // 缩略图加载失败（源文件被删 / 脏引用）→ 隐藏破图，不留裂图占位
@@ -79,21 +96,53 @@ export function createFavoritesPanel(ctx) {
         inlineRename(nameEl, it.name, (newName) => doRename(it, newName));
       } }, "✎");
       card.appendChild(h("div", { class: "act" }, delB, renB));
+      // 右键菜单：保存到本地文件夹（按收藏分类）/ 在文件夹中显示 / 改名 / 移出收藏
+      card.oncontextmenu = (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        contextMenu(ev.clientX, ev.clientY, [
+          { icon: "⬇", label: "保存到本地文件夹（自动分类）", hint: CAT_CN[it.category] || "素材",
+            onClick: () => saveAssetHere(ctx, it.rel, it.category) },
+          { icon: "📂", label: "在文件夹中显示", onClick: () => revealRel(ctx, it.rel) },
+          { divider: true },
+          { icon: "✎", label: "改收藏名", onClick: () => {
+            const nameEl = card.querySelector(".mn");
+            if (nameEl) nameEl.classList.add("editing");
+            inlineRename(nameEl, it.name, (v) => doRename(it, v));
+          } },
+          { divider: true },
+          { icon: "🗑", label: "移出收藏", danger: true, onClick: async () => {
+            if (!confirm(`移出收藏「${it.name}」？`)) return;
+            try { await ctx.api.favoriteRemove([{ rel: it.rel, category: it.category }]); ctx.toast("已移出收藏"); await load(); }
+            catch (err) { ctx.toast("移除失败: " + err.message, true); }
+          } },
+        ]);
+      };
       card.onclick = () => { if (url && it.kind !== "audio") lightbox(url, it.kind); else ctx.toast("音频素材：请到剪辑面板试听", true); };
       grid.appendChild(card);
     }
   };
 
+  let _loading = false;
   const load = async (opts = {}) => {
+    if (_loading) return;
+    _loading = true;
     try {
       // 订阅回调里不要再触发 refresh（否则 refresh→notify→load→refresh 死循环）
       if (opts.refreshRegistry !== false) {
         await assetRegistry.refresh(); // 收藏库/素材库变化 → 全局注册表 → 全面板 token 实时更新
       }
       items = assetRegistry.favs;
-      headLbl.textContent = `共 ${items.length} 条收藏（名字 → 文件映射，供分镜按名称引用）`;
+      // 本地删除实时检测：文件被外部删掉/改名的收藏条目 → 打「文件已丢失」标
+      try {
+        goneRels.clear();
+        const miss = await missingOf(ctx, items.map((i) => i.rel));
+        miss.forEach((r) => goneRels.add(r));
+      } catch (_) {}
+      headLbl.textContent = `共 ${items.length} 条收藏（名字 → 文件映射，供分镜按名称引用）`
+        + (goneRels.size ? ` · ⚠ ${goneRels.size} 条文件已丢失` : "");
       renderTabs(); renderGrid();
     } catch (e) { ctx.toast("加载收藏失败: " + e.message, true); }
+    finally { _loading = false; }
   };
 
   // ✎ 改收藏名：同步磁盘文件（必要时）+ 全局重映射 + 广播所有面板
@@ -155,13 +204,20 @@ export function createFavoritesPanel(ctx) {
 
   const el = h("div", { class: "col" },
     h("div", { class: "card", style: { display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" } }, tabs, h("div", { class: "mx-spacer" }), searchI),
+    dirRow,
     h("div", { class: "row" }, headLbl, h("div", { class: "mx-spacer" }), delAll, selDelBtn, clearBtn, delLbl,
       h("button", { class: "btn", style: { padding: "6px 12px" }, onclick: () => ctx.switchTo("assets") }, "去素材库添加")),
     grid);
   load();
   // 其它面板改过资产（素材库重命名 / 剪辑删素材）→ 本面板实时重扫（不再触发 registry 刷新，防死循环）
   assetRegistry.subscribe(() => { if (el.isConnected) load({ refreshRegistry: false }); });
-  return { el, update: () => load() };
+  // 本地删除实时检测：文件被外部删掉 → 卡片打「文件已丢失」标（并可一键清理失效收藏）
+  const stopWatch = startAssetWatch(ctx, () => load({ refreshRegistry: false }), { active: () => el.isConnected });
+  return {
+    el,
+    update: () => { dirRow.refreshDir && dirRow.refreshDir(); load(); },
+    stop: () => { try { stopWatch(); } catch (_) {} closeContextMenu(); },
+  };
 }
 
 function CAT_LABEL_CLS(c) {

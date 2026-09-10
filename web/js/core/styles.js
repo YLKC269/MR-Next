@@ -378,6 +378,27 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 /* 改名中的输入框：占满卡片名字那一行，金色描边提示"正在编辑" */
 .mcard .mn input { display: block; }
 .mcard .mn.editing { padding: 1px 2px; }
+/* 素材/收藏卡：本地文件已丢失（被外部删除）→ 红边 + 角标 */
+.mcard.gone { outline: 2px dashed #ff6b6b; opacity: .72; }
+.mcard.gone .th::after { content: "文件已丢失"; position: absolute; left: 6px; bottom: 6px; font-size: 10.5px;
+  color: #ffd9d9; background: rgba(120,20,20,.85); border: 1px solid #ff8a8a; border-radius: 6px; padding: 1px 6px; }
+
+/* ---- 资产右键菜单（挂 body，fixed 定位）---- */
+.mx-ctxmenu { position: fixed; z-index: 2147483500; min-width: 232px; padding: 5px;
+  background: linear-gradient(180deg, #16213a, #0d1729); border: 1px solid var(--panel-line, #31446a);
+  border-radius: 10px; box-shadow: 0 16px 44px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.06);
+  display: flex; flex-direction: column; gap: 2px; }
+.mx-ctxmenu-sep { height: 1px; margin: 4px 6px; background: rgba(120,170,255,.16); }
+.mx-ctxmenu-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 7px 10px; border: 0; border-radius: 7px; background: transparent; color: #dbe6f4;
+  font-size: 12.5px; cursor: pointer; transition: background .12s; }
+.mx-ctxmenu-item .ic { width: 16px; text-align: center; flex: 0 0 16px; }
+.mx-ctxmenu-item .tx { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mx-ctxmenu-item .hint { flex: 0 0 auto; font-size: 10.5px; color: #8ba0bd; }
+.mx-ctxmenu-item:hover:not(:disabled) { background: rgba(58,86,138,.4); color: #fff; }
+.mx-ctxmenu-item:disabled { opacity: .45; cursor: not-allowed; }
+.mx-ctxmenu-item.danger { color: #ffb1b1; }
+.mx-ctxmenu-item.danger:hover:not(:disabled) { background: rgba(180,50,50,.45); color: #fff; }
 .mcard .ck { position: absolute; bottom: 5px; right: 5px; width: 15px; height: 15px; cursor: pointer; opacity: 0; transition: opacity .18s var(--ease); }
 .mcard:hover .ck { opacity: 1; }
 .mcard.chk { outline: 2px solid #ff6b6b; }

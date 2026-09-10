@@ -107,7 +107,9 @@ export function createScriptPanel(ctx) {
           });
           const arr = res.shots || [];
           // 把后端抽出的 header（首段定义头）一次性写回 store.prefix
-          const patch = { shots: arr };
+          // splitStamp：告诉时间线"分镜方案换了" → 它会丢掉旧的每镜缓存，重新从 refMap 自动导入素材
+          const stamp = Date.now();
+          const patch = { shots: arr, splitStamp: stamp };
           if (res.header && res.header.trim() && !prefixTa.value().trim()) {
             patch.prefix = res.header;
             // 同步回 prefixTa DOM
@@ -115,7 +117,7 @@ export function createScriptPanel(ctx) {
           }
           s.set(patch);
           // 持久化 perShot → store.refMap（每镜的素材引用 list）
-          if (Array.isArray(res.perShot)) s.set({ refMap: res.perShot });
+          if (Array.isArray(res.perShot)) s.set({ refMap: res.perShot, splitStamp: stamp });
           const withSec = arr.filter((x) => x.sec != null).length;
           const missingTotal = (res.missingImages || []).length + (res.missingAudios || []).length + (res.missingVideos || []).length;
           let msg = `已拆分 ${arr.length} 镜${withSec ? ` · 自动时长 ${withSec} 镜` : ""}`;

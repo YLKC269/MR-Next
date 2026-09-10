@@ -53,8 +53,15 @@ export function mountApp(shadow, node) {
   };
   const store = createStore({
     folder: "mrboard_next",
+    // 资产本地保存路径（素材库/收藏库「📁 保存路径」设置；右键可把资产按分类导出到这儿）
+    assetDir: "",
     script: "",
     shots: [],
+    // 每镜素材引用（split 返回的 perShot：[[{name,rel,kind,category}], ...]）
+    refMap: [],
+    // 分镜方案版本号：每次「拆分分镜 / 匹配引用 / 切分到导演台」+1。
+    // 时间线面板靠它判断"方案换了"→ 丢掉旧的每镜缓存，重新从 refMap 自动导入素材。
+    splitStamp: 0,
     roles: [],
     scenes: [],
     // 视频分辨率档位（H3 导演台出片 + 一键流水线 共享；与生图档位分开）
