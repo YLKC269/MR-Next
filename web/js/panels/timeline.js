@@ -1571,6 +1571,12 @@ export function createTimelinePanel(ctx) {
     exportModeBtn.textContent = isAll ? "🎬 全部导出（拼接）" : "📦 分段导出（独立）";
     exportModeBtn.classList.toggle("btn-primary", isAll);
   }
+  // ⚠ 必须在构造后立刻刷一次：这个按钮创建时**不带文案**，如果只在 onclick 里刷新，
+  // 首次打开面板得到的是一个「空文案按钮」——宽 126px 但有 padding 无内容 → 高仅 11px，
+  // 视觉上就是"按钮没显示/只有一条细缝"；点一下（触发 onclick）才写上文案 → 用户报的
+  // 「全部导出的按钮有时候不显示，点一下才出来」就是它。renderAll 里也刷，保证
+  // 从 plan/store 恢复 exportMode 后文案同步。
+  refreshExportModeBtn();
   // 全选/取消（只作用于当前所有镜）
   const selAllBtn = h("button", {
     class: "btn", style: { padding: "6px 11px" },
@@ -1679,7 +1685,13 @@ export function createTimelinePanel(ctx) {
     Object.keys(shotsCfg).forEach((k) => delete shotsCfg[k]);   // 方案换了 → 每镜缓存作废
   };
 
-  const renderAll = () => { syncPlanStamp(); renderTrack(); renderEditor(); };
+  const renderAll = () => {
+    // 工具条文案与状态同步：导出方式按钮（空文案 → 面板看起来"按钮不见了"）
+    // 与二采提示（静态文案会与下拉值脱节）都必须每次渲染都刷一遍
+    try { refreshExportModeBtn(); } catch (_) {}
+    try { syncUpHint(); } catch (_) {}
+    syncPlanStamp(); renderTrack(); renderEditor();
+  };
   const toggleLog = () => {
     logOpen = !logOpen;
     logBar.classList.toggle("tl-log-open", logOpen);
@@ -1695,6 +1707,15 @@ export function createTimelinePanel(ctx) {
     h("option", { value: "manual" }, "确定后再二采"));
   upModeSel.value = P.output.upscale_mode || "off";
   upModeSel.onchange = () => { P.output.upscale_mode = upModeSel.value; renderAll(); };
+  // 二采提示文字：原来是写死在 el 里的静态文案 → 选完「自动二采」仍显示「（仅一采）」。
+  // 改成随下拉值刷新（renderAll 里也会刷，保证从 plan/store 恢复后一致）。
+  const upHint = h("span", { class: "muted", style: { fontSize: 10.5 } });
+  function syncUpHint() {
+    const v = upModeSel.value || "off";
+    upHint.textContent = v === "auto" ? "（出片后自动二采）"
+      : v === "manual" ? "（出片后点预览区二采）" : "（仅一采）";
+  }
+  syncUpHint();
   const upEngineSel = h("select", { class: "select", style: { width: "auto", padding: "4px 6px", fontSize: 11 } },
     h("option", { value: "rtx" }, "RTX VSR"),
     h("option", { value: "flash" }, "TE-FlashVSR"),
@@ -1709,7 +1730,10 @@ export function createTimelinePanel(ctx) {
   upScaleIn.oninput = () => { P.output.upscale_scale = Math.max(1, Math.min(4, Number(upScaleIn.value) || 2)); };
 
   const el = h("div", { class: "col", style: { flex: "1 1 0", minHeight: 0, gap: 6 } },
-    h("div", { class: "col", style: { gap: 4, flex: "0 0 auto" } }, tabBar, paramRow),
+    // 参数区：flex 0 1 auto + 内部滚动 —— 面板高度不够时"参数区自己缩"，而不是把下面的
+    // 工具条行挤出可视区（.mx-content 是 overflow:hidden，以前矮面板下工具条会被裁掉，
+    // 表现为"导出按钮有时候不显示，点一下参数 tab 才出来"）
+    h("div", { class: "col", style: { gap: 4, flex: "0 1 auto", minHeight: 0, overflowY: "auto" } }, tabBar, paramRow),
     h("div", { class: "row", style: { flex: "0 0 auto", gap: 6, flexWrap: "wrap", alignItems: "center" } },
       runAllBtn,
       runSelBtn,
@@ -1756,7 +1780,7 @@ export function createTimelinePanel(ctx) {
       upModeSel,
       upEngineSel,
       h("span", { class: "muted", style: { fontSize: 11 } }, "倍率"), upScaleIn,
-      h("span", { class: "muted", style: { fontSize: 10.5 } }, upModeSel && upModeSel.value === "auto" ? "（出片后自动二采）" : upModeSel && upModeSel.value === "manual" ? "（出片后点预览区二采）" : "（仅一采）"),
+      upHint,
       h("button", { class: "btn", style: { padding: "6px 11px" }, onclick: () => ctx.switchTo("editor") }, "去剪辑")),
     scroll,
     h("div", { class: "col", style: { gap: 4, flex: "1 1 auto", minHeight: 0, overflowY: "auto" } }, editorHost),

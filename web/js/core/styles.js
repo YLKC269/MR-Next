@@ -603,7 +603,8 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 .ed-track-lbl { flex: 0 0 46px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: var(--accent, #5eead4); border-right: 1px solid var(--panel-line); }
 .ed-clip { flex: 0 0 auto; min-width: 74px; padding: 4px 8px; background: linear-gradient(180deg, #1c3a5e, #13263f);
   border: 1px solid #2a5d88; border-radius: 7px; cursor: grab; color: #cfe4f7; font-size: 11px;
-  display: flex; flex-direction: column; gap: 2px; box-shadow: inset 0 1px 0 var(--panel-hi); transition: all .18s var(--ease); }
+  display: flex; flex-direction: column; gap: 2px; box-shadow: inset 0 1px 0 var(--panel-hi); transition: all .18s var(--ease);
+  overflow: hidden; }   /* 自适应缩放后片段可能很窄：裁掉溢出的文字，别糊到相邻片段上 */
 .ed-clip .cd { font-size: 9.5px; color: #7f9cba; }
 .ed-clip:hover { filter: brightness(1.18); transform: translateY(-1px); }
 .ed-clip:active { cursor: grabbing; }

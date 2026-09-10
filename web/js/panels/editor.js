@@ -38,7 +38,56 @@ export function createEditorPanel(ctx) {
   const delSet = new Set(); // 素材多选删除
 
   // ---------- 剪映式时间轴：像素/秒、播放头、吸附步长 ----------
-  const PPS = 30;        // 时间轴缩放：30px = 1s（片段宽度按时长等比）
+  const PPS = 30;        // 时间轴基准缩放：30px = 1s（素材放得下时用这个）
+  // ---- 自适应缩放（fit-to-width）：素材一多自动缩小比例，让整条时间线放得进轨道可视宽度 ----
+  // 以前比例固定 30px/s：片段一多 → .ed-track 的 scrollWidth > clientWidth，
+  // 末尾片段被顶到可视区外（看起来"被裁切"），而且标尺是独立元素、不跟轨道滚 →
+  // 刻度与片段错位。现在按"整条时长 ÷ 轨道内宽"自动算比例；实在太多片段时停止缩小、
+  // 保留横向滚动（标尺/三条轨一起滚）。
+  const MIN_FIT_PPS = 1.5;   // 比例下限（px/秒）：再挤也不小于它
+  const MIN_CLIP_PX = 20;    // 片段平均宽度软下限：低于它就不再缩，改由横向滚动兜底
+  let ppsNow = PPS;          // 当前实际比例（标尺/播放头/裁剪换算全部用它）
+  // 注意：必须用"布局像素"（clientWidth），不能用 getBoundingClientRect().width ——
+  // 后者含画布缩放（实测 0.9），会把缩放系数带进宽度计算，导致自适应永远填不满。
+  const trackBoxW = () => {
+    try {
+      const w = rowV1.clientWidth;
+      if (w > 40) return w + 2;   // +2 = 左右边框，还原成 border-box 宽
+    } catch (_) {}
+    return 900;
+  };
+  const trackInnerW = () => {
+    // 可用裁剪宽度 = 轨道宽 - 轨标签(46) - 边框与内边距(12) - 标签与首片段间距(6)
+    //                - 片段之间的 gap(6×(n-1)) - 余量(6)
+    const n = Math.max(v1.length, v2.length, a1.length, 1);
+    return Math.max(90, trackBoxW() - 46 - 12 - 6 - 6 * Math.max(0, n - 1) - 6);
+  };
+  const recalcFit = () => {
+    const avail = trackInnerW();
+    const span = Math.max(trackDur(v1), trackDur(v2), trackDur(a1));
+    const n = Math.max(v1.length, v2.length, a1.length, 1);
+    let p = PPS;
+    if (span > 0.01) {
+      p = Math.min(PPS, avail / span);                                  // ① 整条放得进可视宽度
+      const avg = span / n;                                             // ② 但别把片段压到看不清
+      p = Math.max(p, Math.min(PPS, MIN_CLIP_PX / Math.max(0.01, avg)));
+    }
+    const changed = Math.abs(p - ppsNow) > 0.01;
+    ppsNow = Math.max(MIN_FIT_PPS, p);
+    return changed;
+  };
+  // ---- 画布缩放补偿 ----
+  // 节点 DOM widget 会被 ComfyUI 画布整体缩放（实测 0.9）：指针事件给的是"屏幕像素"，
+  // 而我们的 left/width 是"布局像素"。换算像素↔秒时必须除以这个系数，
+  // 否则拖动播放头/裁剪边缘会整体偏小（缩放 90% 时偏差 10%，越拖越不准）。
+  const uiScale = () => {
+    try {
+      const w = ruler.offsetWidth || 0;
+      const r = ruler.getBoundingClientRect().width || 0;
+      if (w > 0 && r > 0) return r / w;
+    } catch (_) {}
+    return 1;
+  };
   const SNAP = 0.1;      // 吸附步长（秒）
   const snapTo = (v) => Math.round(v / SNAP) * SNAP;
   let playheadSec = 0;   // 播放头位置（秒，整条时间轴）
@@ -76,7 +125,8 @@ export function createEditorPanel(ctx) {
       requestAnimationFrame(() => { queued = false; fn(lastArg); });
     };
   };
-  const clipW = (c) => Math.max(46, Math.min(460, Math.round(effDur(c) * PPS)));
+  // 片段宽度按当前自适应比例换算（下限 8px，几乎不参与布局；主要由 ppsNow 决定总宽）
+  const clipW = (c) => Math.max(8, Math.min(460, Math.round(effDur(c) * ppsNow)));
   const fmt = (s) => (s == null ? "?" : Number(s).toFixed(1) + "s");
   const MINLEN = 0.1;   // 片段最短时长（秒），裁剪拖拽的下限
   const clampSpeed = (c) => Math.max(0.5, Math.min(2, Number(c && c.speed) || 1));
@@ -362,32 +412,37 @@ export function createEditorPanel(ctx) {
   const playheadEl = h("div", { style: { position: "absolute", top: 0, bottom: 0, width: 2, background: "#ffcf6b",
     boxShadow: "0 0 6px #ffcf6b", pointerEvents: "none", left: 0 } });
   let _rulerTotal = -1;   // 缓存：总时长没变就不重建刻度（拖拽时省掉上百个 DOM 节点）
+  const drawPlayhead = () => {
+    playheadEl.style.left = Math.round(playheadSec * ppsNow) + "px";
+  };
   const renderRuler = () => {
     const total = Math.max(4, Math.max(trackDur(v1), trackDur(v2)));
     if (Math.abs(total - _rulerTotal) < 1e-6) {
-      playheadEl.style.left = Math.round(playheadSec * PPS) + "px";
+      drawPlayhead();
       return;
     }
     _rulerTotal = total;
     clear(ruler);
-    const px = Math.min(4000, Math.round(total * PPS));
-    for (let t = 0; t <= total + 0.001; t += 1) {
-      const x = t * PPS;
-      const major = Math.abs(t % 5) < 1e-6;
+    // 刻度步长随缩放自适应：比例小的时候不再画几百条线（可视区里保持 8~60 个主刻度）
+    const px = Math.min(8000, Math.round(total * ppsNow));
+    const stepSec = Math.max(1, Math.ceil(total / Math.max(6, Math.min(60, Math.round(trackInnerW() / 62)))));
+    for (let t = 0; t <= total + 0.001; t += stepSec) {
+      const x = Math.round(t * ppsNow);
+      const major = t === 0 || Math.abs((t / stepSec) % 5) < 1e-6;
       ruler.appendChild(h("div", { style: { position: "absolute", left: x + "px", bottom: 0,
         width: 1, height: major ? 12 : 6, background: major ? "#5b7ba6" : "#31456b" } }));
       if (major) ruler.appendChild(h("span", { style: { position: "absolute", left: (x + 3) + "px", top: 1,
-        fontSize: 10, color: "#7d9dba", userSelect: "none" } }, t + "s"));
+        fontSize: 10, color: "#7d9dba", userSelect: "none" } }, Math.round(t * 10) / 10 + "s"));
     }
     ruler.appendChild(playheadEl);
-    playheadEl.style.left = Math.round(playheadSec * PPS) + "px";
     ruler.style.minWidth = px + "px";
+    drawPlayhead();
   };
 
   // ---- 播放头：只改 left（零重排），拖动时 rAF 节流跟手 ----
   const setPlayhead = (sec, seekPreview) => {
     playheadSec = Math.max(0, snapTo(sec));
-    playheadEl.style.left = Math.round(playheadSec * PPS) + "px";
+    drawPlayhead();
     if (!seekPreview) return;
     let acc = 0;
     for (const c of v1) {
@@ -408,7 +463,8 @@ export function createEditorPanel(ctx) {
     e.preventDefault();
     const tip = _scrubTip();
     const r0 = ruler.getBoundingClientRect();
-    const px2sec = (clientX) => Math.max(0, (clientX - r0.left) / PPS);
+    // 指针 → 秒：比例用自适应值；标尺在溢出兜底时被 translateX 平移，r0 已含偏移，无需再加
+    const px2sec = (clientX) => Math.max(0, (clientX - r0.left) / (ppsNow * uiScale()));
     const paintHead = rafThrottle((clientX) => {
       setPlayhead(px2sec(clientX), false);
       tip.textContent = `播放头 ${playheadSec.toFixed(1)}s`;
@@ -433,20 +489,50 @@ export function createEditorPanel(ctx) {
     document.addEventListener("pointercancel", up);
   });
 
+  // 自适应缩放提示（比例 < 基准时才显示，如「已自适应 12.0px/s · 整条 45.0s 全览」）
+  const fitLbl = h("span", { class: "muted", style: { fontSize: 10.5 } });
   const rowV1 = h("div", { class: "ed-track" });
   const rowV2 = h("div", { class: "ed-track" });
   const rowA1 = h("div", { class: "ed-track" });
   let dragFrom = null;
 
+  // ---- 轨道 ↔ 标尺横向滚动同步 ----
+  // 比例自适应后一般放得下（不滚动）；万一素材极多仍溢出，三条轨 + 标尺共用同一个
+  // 横向偏移（标尺用 translateX 跟随），否则滚了轨道刻度还停在原处、和片段对不上。
+  const syncHScroll = (src) => {
+    const x = Math.max(0, src.scrollLeft || 0);
+    [rowV1, rowV2, rowA1].forEach((el) => { if (el !== src && el.scrollLeft !== x) el.scrollLeft = x; });
+    ruler.style.transform = x ? "translateX(" + (-x) + "px)" : "";
+  };
+  [rowV1, rowV2, rowA1].forEach((el) => el.addEventListener("scroll", () => syncHScroll(el), { passive: true }));
+
+  // ---- 面板宽度变化（节点缩放 / 协作台抽屉开合）→ 重算比例并重绘 ----
+  // 只在比例真的变了才重建轨道，避免"重建→尺寸微变→再重建"的抖动循环
+  if (typeof ResizeObserver === "function") {
+    let _roRaf = 0;
+    const ro = new ResizeObserver(() => {
+      if (_roRaf) return;
+      _roRaf = requestAnimationFrame(() => {
+        _roRaf = 0;
+        try { if (!el.isConnected) return; } catch (_) { return; }
+        const changed = recalcFit();
+        if (changed) renderTracks();
+        renderRuler();
+      });
+    });
+    try { ro.observe(rowV1); } catch (_) {}
+  }
+
   // 探时长（带缓存）：回来后只刷新该片段宽度 + 标尺（总时长没变则连标尺也不重建）
   const probeDur = (clip) => {
     if (!clip || !clip.rel) return;
-    if (probeCache.has(clip.rel)) { clip.dur = probeCache.get(clip.rel); updateClipVisual(clip); renderRuler(); return; }
+    if (probeCache.has(clip.rel)) { clip.dur = probeCache.get(clip.rel); updateClipVisual(clip); refitSoon(); return; }
     ctx.api.probeEditor(clip.rel).then((p) => {
       const d = (p && p.duration != null) ? Number(p.duration) : null;
       if (d != null) probeCache.set(clip.rel, d);
       clip.dur = d;
       updateClipVisual(clip);
+      refitSoon();     // 总时长变了 → 重算自适应比例
       renderRuler();
     }).catch(() => { clip.dur = null; });
   };
@@ -475,7 +561,36 @@ export function createEditorPanel(ctx) {
     return clips.length;
   };
 
+  const updateFitLabel = () => {
+    try {
+      const _span = Math.max(trackDur(v1), trackDur(v2), trackDur(a1));
+      fitLbl.textContent = ppsNow < PPS - 0.5
+        ? `（已自适应缩放 ${ppsNow.toFixed(1)}px/s，整条 ${_span.toFixed(1)}s 全览）` : "";
+    } catch (_) {}
+  };
+  // ★ 时长是"异步探回来"的：addManyToTrack 入轨那一刻 clip.dur 还是 null（按 0.1s 算），
+  //   等 ffprobe 结果回来总时长才变长 → 必须重算一次自适应比例，否则永远按 0.1s 判"放得下"。
+  //   这里只就地改每个片段的宽度（不重建 DOM），保持丝滑。
+  let _fitRaf = 0;
+  const refitSoon = () => {
+    if (_fitRaf) return;
+    _fitRaf = requestAnimationFrame(() => {
+      _fitRaf = 0;
+      if (!recalcFit()) { renderRuler(); return; }
+      _clipEls.forEach((el, c) => {
+        const w = clipW(c);
+        el.style.width = w + "px";
+        el.style.minWidth = w + "px";
+      });
+      updateFitLabel();
+      renderRuler();
+    });
+  };
+
   const renderTracks = () => {
+    // 先按当前素材量算一次自适应比例（决定片段宽度），再重建轨道
+    recalcFit();
+    updateFitLabel();
     clear(rowV1); clear(rowV2); clear(rowA1);
     _clipEls.clear();
     [[v1, rowV1, "V1 视频主轨"], [v2, rowV2, "V2 视频副轨"], [a1, rowA1, "A1 音频轨"]].forEach(([arr, row, label]) => {
@@ -533,7 +648,8 @@ export function createEditorPanel(ctx) {
             const paint = () => {
               const e2 = lastEv;
               if (!e2) return;
-              const ds = ((e2.clientX - startX) / PPS) * spd;   // 像素 → 秒（按变速折算到源时间）
+              // 屏幕像素 → 秒：先补画布缩放系数，再除自适应比例；按变速折算到源时间
+              const ds = ((e2.clientX - startX) / (ppsNow * uiScale())) * spd;
               if (side === "in") {
                 c.in = Math.max(0, Math.min(snapTo(in0 + ds), out0 - MINLEN));
               } else {
@@ -922,7 +1038,8 @@ export function createEditorPanel(ctx) {
         h("button", { class: "btn", onclick: () => { const cur = selected && selected.obj; if (cur && cur.kind === "video") addToTrack(v1, cur); else ctx.toast("先选中一个视频素材", true); } }, "＋ V1 主轨"),
         h("button", { class: "btn btn-primary", style: { padding: "6px 11px" }, title: "把 V1 主轨的多段素材按顺序无缝串联预览（尊重每段入点/出点裁剪）", onclick: () => playSequential(v1) }, "▶ 连播预览"),
         h("button", { class: "btn", onclick: () => { const cur = selected && selected.obj; if (cur && cur.kind === "video") addToTrack(v2, cur); else ctx.toast("先选中一个视频素材", true); } }, "＋ V2 副轨"),
-        h("button", { class: "btn", onclick: () => { const cur = selected && selected.obj; if (cur && cur.kind === "audio") addToTrack(a1, cur); else ctx.toast("先选中一个音频素材", true); } }, "＋ A1 音频轨")),
+        h("button", { class: "btn", onclick: () => { const cur = selected && selected.obj; if (cur && cur.kind === "audio") addToTrack(a1, cur); else ctx.toast("先选中一个音频素材", true); } }, "＋ A1 音频轨"),
+        fitLbl),
       ruler, rowV1, rowV2, rowA1, editBar),
     result);
 
