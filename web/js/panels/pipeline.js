@@ -186,6 +186,7 @@ export function createPipelinePanel(ctx) {
                 const res = await ctx.api.generate({
                   prompt: job.prompt, folder, model: s.get().genModel || modelSel.value, seed: i,
                   width: job.w, height: job.h, steps: Number(s.get().genSteps) || 8,
+                  loras: (ctx.store.get().loras || []), lora_folder: (ctx.store.get().loraFolder || ""),
                 });
                 if (res.ok) {
                   stats.generated += 1;

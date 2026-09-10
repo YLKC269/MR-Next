@@ -6,6 +6,7 @@ import { PROMPT_PRESETS } from "../core/assetgen_presets.js";
 import { lightbox } from "../core/ui.js";
 import { SIZES, DEFAULT_SIZE_INDEX, CUSTOM_SIZE_INDEX, resolveSize } from "../core/sizes.js";
 import { createLoraControls } from "./lora_controls.js";
+import { createLoraPicker } from "./lora_picker.js";
 
 const MODES = [
   { key: "t2i",  label: "✨ 文生图",   hint: "文字直接生图" },
@@ -56,7 +57,10 @@ export function createGeneratePanel(ctx) {
   const modelSel = h("select", { class: "select" });
   const teSel = h("select", { class: "select" });
   const vaeSel = h("select", { class: "select" });
-  const editLoraSel = h("select", { class: "select", id: "mrnext-gen-lorasel" });
+  // 隐藏保留：lora_controls 会往这个 id 注入列表（不再直接给用户看，用户走下面的「选择 LoRA」浮层）
+  const editLoraSel = h("select", { class: "select", id: "mrnext-gen-lorasel", style: { display: "none" } });
+  // 🎚 点击弹出 LoRA 列表（点一项即用，可多选 + 调强度）——对所有生图模式生效
+  const loraPicker = createLoraPicker(ctx, { onChange: () => { try { loadConfig(); } catch (_) {} } });
   const sizeSel = h("select", { class: "select", style: { width: "auto" } },
     ...SIZES.map(([label], i) => h("option", { value: String(i) }, label)));
   // 自定义宽高输入（选「自定义」档位时显示）
@@ -163,11 +167,7 @@ export function createGeneratePanel(ctx) {
   );
 
   // 编辑 LoRA 行（edit）
-  const editLoraRow = h("div", { class: "row", style: { display: "none", marginTop: 6, gap: 8 } },
-    h("span", { class: "muted", style: { fontSize: 11 } }, "编辑 LoRA"),
-    editLoraSel,
-    h("span", { class: "muted", style: { fontSize: 11 } }, "（自动套用 Krea2 identity_edit）"),
-  );
+  // 旧的行内单选已由「🎚 选择 LoRA」浮层取代（保留元素隐藏，避免破坏注入逻辑）
 
   function setSrcRel(rel, name) {
     state.srcRel = String(rel || "").trim();
@@ -300,7 +300,6 @@ export function createGeneratePanel(ctx) {
     srcRow.style.display = (state.mode === "i2i" || state.mode === "edit") ? "flex" : "none";
     strengthWrap.style.display = state.mode === "i2i" ? "flex" : "none";
     refRow.style.display = state.mode === "ref" ? "flex" : "none";
-    editLoraRow.style.display = state.mode === "edit" ? "flex" : "none";
     // 增强仅对 t2i / ref 有意义（i2i/edit 输出尺寸=原图，避免放大越界）
     const canEnhance = state.mode === "t2i" || state.mode === "ref";
     enhanceLbl.style.display = canEnhance ? "flex" : "none";
@@ -346,8 +345,8 @@ export function createGeneratePanel(ctx) {
         if (n === d.edit_lora && useLora) o.selected = true;
         editLoraSel.appendChild(o);
       }
-      if (d.edit_lora && useLora) state.editLora = d.edit_lora;
-      else state.editLora = "";
+      const picked = loraPicker.get();
+      state.editLora = picked.length ? picked[0].name : ((d.edit_lora && useLora) ? d.edit_lora : "");
       const m = modelSel.value || d.model || "";
       const te = teSel.value || d.text_encoder || "-";
       const va = vaeSel.value || d.vae || "-";
@@ -471,10 +470,16 @@ export function createGeneratePanel(ctx) {
             enhance_scale: Number(enhScaleIn.value) || 2,
             pid: myPid,
           };
+          // LoRA：所有模式统一带上（后端已把 LoRA 链接到 t2i/i2i/ref/edit 的公共路径）
+          const loraSel = loraPicker.get();
+          if (loraSel.length) {
+            payload.loras = loraSel;
+            payload.lora_folder = (ctx.store.get().loraFolder || "").trim();
+          }
           if (mode === "i2i" || mode === "edit") {
             payload.src_rel = state.srcRel;
             if (mode === "i2i") payload.strength = state.strength;
-            if (mode === "edit") payload.edit_lora = state.editLora || editLoraSel.value || "";
+            if (mode === "edit") payload.edit_lora = state.editLora || "";
           }
           if (mode === "ref") {
             payload.ref_rels = state.refRels.slice();
@@ -483,6 +488,12 @@ export function createGeneratePanel(ctx) {
           if (vaeSel.value) payload.vae = vaeSel.value;
           const res = await ctx.api.generate(payload);
           note.textContent = res.note || `完成 ${res.count || 1} 张`;
+          if (res.loras_dropped && res.loras_dropped.length) {
+            const un = res.loras_unloadable || [];
+            ctx.toast(un.length
+              ? `这些 LoRA 无法加载、已被忽略：${un.join("、")}。请放进 models/loras/ 或在 extra_model_paths.yaml 登记其文件夹后重启`
+              : `这些 LoRA 没找到、已被忽略：${res.loras_dropped.join("、")}`, true);
+          }
           lastRels.length = 0;
           lastRels.push(...(res.rels || (res.rel ? [res.rel] : [])));
           selSet.clear();
@@ -572,10 +583,11 @@ export function createGeneratePanel(ctx) {
           h("span", { class: "muted", style: { fontSize: 11 } }, "Krea2 真实扩散 · 失败自动占位"),
         ),
         promptTa,
-        srcRow, refRow, editLoraRow,
+        srcRow, refRow,
         h("div", { class: "row", style: { marginTop: 6, flexWrap: "wrap", gap: 4, padding: "6px 8px", background: "rgba(255,207,107,.06)", border: "1px solid #5e3e10", borderRadius: 7 } },
           h("span", { style: { fontSize: 11, color: "#ffcf6b", fontWeight: 700 } }, "⚡ LoRA"),
           loraCtl.row,
+          loraPicker.row,
         ),
         h("div", { class: "row", style: { marginTop: 8, flexWrap: "wrap" } },
           h("span", { class: "muted" }, "模型"), modelSel,

@@ -6,6 +6,7 @@ import { SCRIPT_TEMPLATES } from "../core/script_templates.js";
 import { SIZES, DEFAULT_SIZE_INDEX, CUSTOM_SIZE_INDEX, resolveSize } from "../core/sizes.js";
 import { parsePrefixDef, planDefinitionJobs } from "../core/prefix_parser.js";
 import { createLoraControls } from "./lora_controls.js";
+import { createLoraPicker } from "./lora_picker.js";
 import { pickAssetFolder } from "../core/ui.js";
 
 export function createScriptPanel(ctx) {
@@ -434,6 +435,7 @@ export function createScriptPanel(ctx) {
               width: job.w,
               height: job.h,
               steps: Number(ctx.store.get().genSteps) || 8,
+              ...({ loras: (ctx.store.get().loras || []), lora_folder: (ctx.store.get().loraFolder || "") }),
             });
             if (res.ok) {
               // 自动改名：把机器名（1788948454574_xxx.png）改成剧本写的名字（如「林晚.png」），
@@ -492,7 +494,9 @@ export function createScriptPanel(ctx) {
   }
 
   // LoRA 控件（与生图面板 / 流水线面板 共享 store.useLora + loraFolder）
-  const loraCtl = createLoraControls(ctx, { inline: true, onChange: () => { /* 批量生图不走 LoRA 单选，留接口 */ } });
+  const loraCtl = createLoraControls(ctx, { inline: true, onChange: () => { /* 文件夹/开关变化由 picker 自己刷新 */ } });
+  // 🎚 点击弹出 LoRA 列表 → 设定图/角色图也吃 LoRA（后端对所有模式生效）
+  const loraPicker = createLoraPicker(ctx, {});
 
   // 「角色/场景设定图」面板
   const genDefSection = h(
@@ -509,7 +513,7 @@ export function createScriptPanel(ctx) {
       h("span", { class: "muted", style: { fontSize: 11 } }, "尺寸"),
       sizeSel, defWIn, h("span", { class: "muted", style: { fontSize: 11 } }, "×"), defHIn,
     ),
-    h("div", { style: { marginTop: 4, fontSize: 11, color: "#a8bbd0" } }, loraCtl.row),
+    h("div", { style: { marginTop: 4, fontSize: 11, color: "#a8bbd0" } }, loraCtl.row, loraPicker.row),
     genLog
   );
 

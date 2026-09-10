@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -1242,8 +1243,15 @@ async def assetgen_config(req):
             edit_lora = str(n)
             if "identity_edit" in low:
                 break
+    # 可加载判定：ComfyUI 能通过 LoraLoaderModelOnly 加载的名字（规范名比较）
+    try:
+        _canon = {str(x).replace("\\", "/").lower() for x in folder_paths.get_filename_list("loras")}
+    except Exception:  # noqa: BLE001
+        _canon = set()
+    loras_loadable = [n for n in loras if str(n).replace("\\", "/").lower() in _canon]
     return _json({
         **lists,
+        "loras_loadable": loras_loadable,
         "loras": loras,
         "loraEnabled": enabled,
         "loraExtra": extra,
@@ -1284,6 +1292,39 @@ async def assetgen_generate(req):
         strength = 0.6
     strength = max(0.05, min(0.95, strength))
     edit_lora = (body.get("edit_lora") or "").strip()
+    # ---- LoRA：所有生图模式通用（此前只有 edit 模式生效，用户实报"选了没用"）----
+    lora_folder = (body.get("lora_folder") or body.get("extra") or "").strip()
+    _want = []
+    for _it in (body.get("loras") or []):
+        if isinstance(_it, dict):
+            _nm = str(_it.get("name") or "").strip()
+            _st = _it.get("strength", None)
+        else:
+            _nm = str(_it or "").strip()
+            _st = None
+        if _nm:
+            _want.append((_nm, _st))
+    loras_used, loras_dropped, loras_unloadable = [], [], []
+    if _want:
+        # 必须用 ComfyUI 自己的权威清单校验：只有它能加载的名字才能通过 validate_prompt。
+        # 我们面板的自定义「LoRA 文件夹」能"看到"文件，但若该目录不在 ComfyUI 的 loras 搜索路径
+        # （models/loras 或 extra_model_paths.yaml 登记过的目录）里，LoraLoaderModelOnly 的
+        # lora_name 会枚举不中 → prompt_outputs_failed_validation（用户实报）。
+        _canon = {}
+        try:
+            for _x in folder_paths.get_filename_list("loras"):
+                _canon[str(_x).replace("\\", "/").lower()] = str(_x)
+        except Exception as _e:  # noqa: BLE001
+            logging.getLogger("ComfyUI-MRBoard.assetgen").warning("读取 loras 清单失败：%s", _e)
+        for _nm, _st in _want[:4]:
+            _key = str(_nm).replace("\\", "/").lower()
+            if _key in _canon:
+                loras_used.append({"name": _canon[_key], "strength": _st})   # 用规范名（原样大小写/分隔符）
+            else:
+                loras_dropped.append(_nm)
+                loras_unloadable.append(_nm)
+        if loras_dropped:
+            logging.getLogger("ComfyUI-MRBoard.assetgen").warning("LoRA 无法加载，已忽略：%s", loras_dropped)
     text_encoder = (body.get("text_encoder") or "").strip()
     vae = (body.get("vae") or "").strip()
     if enhance is True:
@@ -1324,11 +1365,16 @@ async def assetgen_generate(req):
                 seed=seed, width=width, height=height, steps=steps, batch=batch,
                 text_encoder=text_encoder or None, vae=vae or None,
                 enhance=enhance, prompt_id=gen_pid, enhance_scale=enhance_scale,
+                loras=loras_used or None,
                 src_rel=src_rel, ref_rels=ref_rels, strength=strength, edit_lora=edit_lora,
             )
             used_real = True
             enh_txt = {"builtin": " · 内置精修", "seedvr2": " · SeedVR2 超分",
                        "vosr2": " · VOSR2 超分 ×%d" % int(round(enhance_scale or 2))}.get(enhance, "")
+            if loras_used:
+                enh_txt += " · LoRA " + "+".join(
+                    "%s%s" % (x["name"].split("/")[-1], ("×%g" % float(x["strength"])) if x.get("strength") not in (None, "") else "")
+                    for x in loras_used)
             note = "Krea2 " + mode + " 真实生成" + enh_txt
         else:
             # 占位仅适用于 t2i（无 src）；其它模式无模型直接报错
@@ -1358,6 +1404,11 @@ async def assetgen_generate(req):
         "count": len(produced),
         "used_real": used_real,
         "note": note,
+        # LoRA 回执：前端据此提示"哪些没找到"，避免用户以为"选了没用"
+        "loras_used": [x["name"] for x in loras_used],
+        "loras_dropped": loras_dropped,
+        "loras_unloadable": loras_unloadable,
+        "lora_folder": lora_folder,
     })
 
 

@@ -224,9 +224,11 @@ def build_graph_v2(mode, *, prompt, model, text_encoder, vae,
                    width=1024, height=1024, steps=8, seed=0,
                    batch_size=1, prefix="mrnext",
                    src_rel="", ref_rels=None, strength=0.6, edit_lora="",
-                   enhance="off", scale=None):
+                   enhance="off", scale=None, loras=None):
     """四模式构图（参考旧包 mrboard_assetgen.js 的 buildGraph）。
     enhance: off|builtin|seedvr2|vosr2；scale: 放大倍率（builtin=latent 倍数 / seedvr2=目标短边倍数 / vosr2=整数倍）。
+    loras: 要加载的 LoRA 列表，元素可为 "名字" 或 {"name":..., "strength":...}；**所有模式都生效**（此前只有 edit 模式生效）。
+    edit_lora: 兼容老参数（仅 edit 模式、且 loras 为空时作为自动选取的兜底）。
     mode: t2i(文生图) | i2i(图生图) | ref(参考生图) | edit(编辑图)
     - t2i: EmptyLatentImage + KSampler
     - i2i: LoadImage → VAEEncode → KSampler(denoise=strength)
@@ -256,6 +258,32 @@ def build_graph_v2(mode, *, prompt, model, text_encoder, vae,
     pos_key = link(3)
     neg_key = link(4)
 
+    # ---- LoRA 链：所有模式（t2i / i2i / ref / edit）都挂在 UNETLoader → KSampler 之间 ----
+    # 显式传入的 loras 优先；edit 模式且没显式传时，退回自动挑 identity_edit（保持既有行为）。
+    _loras = []
+    for _it in (loras or []):
+        if isinstance(_it, dict):
+            _nm = str(_it.get("name") or "").strip()
+            _st = _it.get("strength", None)
+        else:
+            _nm = str(_it or "").strip()
+            _st = None
+        if _nm:
+            try:
+                _st = float(_st) if _st not in (None, "") else 1.0
+            except (TypeError, ValueError):
+                _st = 1.0
+            _loras.append((_nm, max(0.0, min(2.0, _st))))
+    if not _loras and mode == "edit":
+        _auto = (edit_lora or "").strip() or _pick_edit_lora()
+        if _auto:
+            _loras.append((_auto, 1.0))
+    for _i, (_nm, _st) in enumerate(_loras[:4]):     # 最多叠 4 个，防止误配一堆
+        _nid = "lora" if _i == 0 else "lora%d" % _i
+        g[_nid] = {"class_type": "LoraLoaderModelOnly",
+                   "inputs": {"model": model_key, "lora_name": _nm, "strength_model": float(_st)}}
+        model_key = link(_nid)
+
     # ---- 选择/构造 latent_image ----
     if mode == "t2i" or mode == "ref":
         g["5"] = {"class_type": "EmptyLatentImage",
@@ -281,11 +309,7 @@ def build_graph_v2(mode, *, prompt, model, text_encoder, vae,
     elif mode == "edit":
         g["rl0"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": pos_key, "latent": link("enc")}}
         pos_key = link("rl0")
-        lora_name = (edit_lora or "").strip() or _pick_edit_lora()
-        if lora_name:
-            g["lora"] = {"class_type": "LoraLoaderModelOnly",
-                         "inputs": {"model": model_key, "lora_name": lora_name, "strength_model": 1.0}}
-            model_key = link("lora")
+        # LoRA 已在上面的通用 LoRA 链里处理（含 edit 模式的自动兜底）
 
     # ---- 决定 KSampler denoise 与 steps ----
     if mode == "i2i":
@@ -528,7 +552,7 @@ async def run_krea2_generate(mode, prompt, model, out_root, *,
                               seed=0, width=1024, height=1024, steps=8, batch=1,
                               text_encoder=None, vae=None, timeout=1200, enhance="off",
                               src_rel="", ref_rels=None, strength=0.6, edit_lora="",
-                              prompt_id=None, enhance_scale=None):
+                              prompt_id=None, enhance_scale=None, loras=None):
     """四模式统一生成入口（参考旧包 mrboard_assetgen 的 buildGraph + queuePrompt）。
 
     mode: t2i / i2i / ref / edit。失败抛异常（由调用方回退占位）。
@@ -562,7 +586,7 @@ async def run_krea2_generate(mode, prompt, model, out_root, *,
         width=width, height=height, steps=steps, seed=seed,
         batch_size=batch, prefix=f"mrnext/{pid[:8]}",
         src_rel=src_rel, ref_rels=ref_rels or [], strength=strength, edit_lora=edit_lora,
-        enhance=enhance, scale=enhance_scale,
+        enhance=enhance, scale=enhance_scale, loras=loras,
     )
     return await _run_graph(graph, out_root, timeout=timeout, prompt_id=pid)
 
@@ -646,7 +670,21 @@ async def _run_graph(graph, out_root, *, timeout=1200, prompt_id=None):
     server.node_replace_manager.apply_replacements(graph)
     valid = await execution.validate_prompt(prompt_id, graph, None)
     if not valid[0]:
-        raise RuntimeError("图校验失败: " + str(valid[1])[:400])
+        # 把 node_errors（valid[3]）里的具体原因带出来，否则只有一句 prompt_outputs_failed_validation 看不出问题
+        detail = ""
+        try:
+            _ne = valid[3] if len(valid) > 3 else {}
+            if isinstance(_ne, dict) and _ne:
+                parts = []
+                for _nid, _err in list(_ne.items())[:5]:
+                    _ct = (graph.get(str(_nid)) or {}).get("class_type", "?")
+                    for _e in (_err.get("errors") or [])[:2]:
+                        if isinstance(_e, dict):
+                            parts.append("#%s(%s): %s %s" % (_nid, _ct, _e.get("type"), _e.get("details", "")))
+                detail = " | " + " ; ".join(parts)[:600]
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError("图校验失败: " + str(valid[1])[:300] + detail)
     outputs_to_execute = valid[2]
     # 队列 extra_data：必须带活跃前端 client_id，否则 ComfyUI 前端进度条显示后不会消失。
     # preview_method=auto 让 ComfyUI 在采样中产生预览图（配合上面的 hook 落盘 → 前端实时预览）。

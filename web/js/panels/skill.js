@@ -391,7 +391,11 @@ export function createSkillPanel(ctx) {
               : (style ? `${base}整体风格与背景：${style}。电影级构图，画面干净，无人物，超高清。`
                        : `${base}电影级构图，写实光影，画面干净，无人物，超高清。`);
             try {
-              const res = await ctx.api.generate({ prompt, folder: ctx.store.get().folder || "mrboard_next", model, seed: i, width: job.w, height: job.h, steps: 8 });
+              const res = await ctx.api.generate({
+                prompt, folder: ctx.store.get().folder || "mrboard_next", model, seed: i,
+                width: job.w, height: job.h, steps: 8,
+                loras: (ctx.store.get().loras || []), lora_folder: (ctx.store.get().loraFolder || ""),
+              });
               if (res.ok) {
                 await ctx.api.favoriteAdd([{ name: job.name, rel: res.rel, kind: "image", category: job.category }]);
                 ok += 1; log.push(`✓ ${job.name}（${job.category}）`);
