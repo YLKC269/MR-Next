@@ -84,22 +84,19 @@ export function createScriptPanel(ctx) {
         try {
           // 收集显性标签手动绑定（<Picture N>/<Subject N>/<Audio N>/<Video N> → rel）
           const tagBindings = Object.assign({}, assetRegistry.tagBindings || {});
-          // 收集角色名→rel（自动注入用）：把 prefix 里出现的名字 + 收藏库/绑定合并
+          // 收集角色名→rel（自动注入用）：直接复用公共前缀解析器（与「生成设定图」同源，
+          // 保证「<Subject 1> 林晚，28岁女性」「角色1：林晚，…」「【角色】- 林晚：…」都能拿到名字）
           const roleImages = {};
           const pref = prefixTa.value() || "";
-          // 解析 prefix 中的"角色 N - 名字"和"<Subject N> 名字"声明
-          for (const m of pref.matchAll(/<Subject\s+(\d+)>\s*[:：]?\s*([^：:\n\r]+)/gi)) {
-            const name = String(m[2]).trim().split(/\s+/)[0];
-            if (!name) continue;
-            const rel = assetRegistry.relOf(name);
-            if (rel) roleImages[name] = rel;
-          }
-          for (const m of pref.matchAll(/角色\s*\d+\s*[-—]\s*([^\s：:\n\r]+)/g)) {
-            const name = String(m[1]).trim();
-            if (!name) continue;
-            const rel = assetRegistry.relOf(name);
-            if (rel && !roleImages[name]) roleImages[name] = rel;
-          }
+          try {
+            const pp = parsePrefixDef(pref);
+            for (const b of [...pp.roleBlocks, ...pp.sceneBlocks]) {
+              const name = String(b.name || "").trim();
+              if (!name || roleImages[name]) continue;
+              const rel = assetRegistry.relOf(name);
+              if (rel) roleImages[name] = rel;
+            }
+          } catch (_) {}
           const res = await ctx.api.split({
             script: ta.value(),
             prefix: prefixTa.value() || "",
@@ -393,7 +390,8 @@ export function createScriptPanel(ctx) {
         }
         const { jobs, parsed } = getJobs();
         if (!jobs.length) {
-          ctx.toast("公共前缀里没识别到「角色 N / 场景 N」段落（支持：<Subject N>、<Picture N>、<Style 全局>）", true);
+          const hint = parsed.warnings.length ? `（有 ${parsed.warnings.length} 行没认出来，见下方解析提示）` : "";
+          ctx.toast("公共前缀里没识别到「角色 / 场景」定义" + hint, true);
           return;
         }
         const fav = await ctx.api.favorites().catch(() => ({ items: [] }));
@@ -470,13 +468,22 @@ export function createScriptPanel(ctx) {
     "⚡ 生成设定图并入收藏"
   );
 
-  // 实时维护可见计数（prefix 文本变化时刷：角色 N 行数 / 场景 N 行数）
+  // 实时维护可见计数（prefix 文本变化时刷：识别到的角色/场景 + 未识别行数）
   function refreshCount() {
     try {
       const { jobs, parsed } = getJobs();
-      defCount.textContent = jobs.length
-        ? `  共 ${parsed.roleBlocks.length} 角色 / ${parsed.sceneBlocks.length} 场景（按 prefix 行序）`
-        : "  公共前缀里没找到「角色 N」或「场景 N」段落";
+      if (!jobs.length) {
+        defCount.textContent = "  未识别到角色/场景定义";
+        defCount.title = "支持：<Subject N> 林晚：描述 ／ 角色1：林晚，描述 ／ 场景 1 - 破庙：描述 ／ 【角色】- 林晚：描述 ／ 林晚：描述（裸写法）／ <Style 全局> 冷色调";
+        return;
+      }
+      const warn = parsed.warnings.length ? ` · ⚠ ${parsed.warnings.length} 行未识别` : "";
+      defCount.textContent = `  识别到 ${parsed.roleBlocks.length} 角色 / ${parsed.sceneBlocks.length} 场景${warn}`;
+      defCount.title =
+        (parsed.roleBlocks.length ? "角色：" + parsed.roleBlocks.map((r) => r.name).join("、") + "\n" : "") +
+        (parsed.sceneBlocks.length ? "场景：" + parsed.sceneBlocks.map((s) => s.name).join("、") + "\n" : "") +
+        (parsed.style ? "全局风格：" + parsed.style + "\n" : "") +
+        (parsed.warnings.length ? "未识别行：\n" + parsed.warnings.join("\n") : "");
     } catch (_) { defCount.textContent = ""; }
   }
   refreshCount();

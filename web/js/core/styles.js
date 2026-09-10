@@ -586,6 +586,24 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 .ed-clip.drag { opacity: .5; }
 .ed-editbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border-top: 1px solid rgba(120,170,255,.12); padding-top: 8px; }
 
+/* ---- 丝滑剪辑：拖拽期间只改宽度（0 次全量重绘），关掉过渡动画保证跟手 ---- */
+.ed-clip { will-change: width; }
+.ed-clip.trimming { transition: none !important; filter: brightness(1.25); z-index: 6;
+  box-shadow: 0 0 0 1px var(--gold, #ffcf6b), 0 6px 20px rgba(0,0,0,.55); }
+.ed-track.dragging .ed-clip { transition: none !important; }
+.ed-track.dragging { cursor: ew-resize; }
+.ed-handle { transition: background .12s ease; }
+.ed-handle:hover, .ed-handle.hot { background: var(--gold, #ffcf6b) !important; }
+.ed-trimtip { position: fixed; z-index: 2147483200; pointer-events: none; padding: 3px 9px; border-radius: 7px;
+  background: rgba(8,14,26,.95); border: 1px solid var(--gold, #ffcf6b); color: var(--gold, #ffcf6b);
+  font-size: 11px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums;
+  box-shadow: 0 8px 22px rgba(0,0,0,.6); opacity: 0; transition: opacity .1s ease; transform: translate(-50%, -145%); }
+.ed-trimtip.on { opacity: 1; }
+/* 素材很多时：屏幕外的卡片不参与布局，避免一次性生成上百个缩略图 */
+.ed-mat { content-visibility: auto; contain-intrinsic-size: 96px 92px; }
+.ed-scrubhint { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255,207,107,.5); pointer-events: none; }
+.ed-ruler { touch-action: none; }
+
 /* ---- 生图面板：右侧实时预览（大正方形，宽度自适应填满卡片）---- */
 .gen-preview { position: relative; width: 100%; aspect-ratio: 1/1; min-width: 0; border-radius: 12px;
   background: #000; border: 1px solid #23314a; overflow: hidden; display: flex;

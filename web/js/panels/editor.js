@@ -5,6 +5,21 @@ import { relToViewUrl, editorThumbUrl } from "../core/api.js";
 // 面板可能被重建（切换导航），文档级监听器必须换新前解绑旧的，否则重复触发/泄漏
 let _prevKeys = null;
 
+// ---- 全局快捷键护栏 ----
+// ComfyUI 自己也把 Ctrl+Z（撤销工作流）绑在 window 的捕获阶段，且注册得比扩展早。
+// 若等到「面板创建」时才注册，我们的 handler 永远排在它后面 → 一次 Ctrl+Z 会同时
+// 把画布上的 MRBoard 节点撤掉（表现为面板 DOM 被拆、后续交互全部失效）。
+// 因此这里在**模块加载期**就抢注一个 window 捕获监听，把当前激活剪辑面板的处理函数
+// 转发进去；只要模块比 ComfyUI 的热键注册得更早，就能第一时间吃掉这几个键。
+let _activeEditorKeyHandler = null;
+try {
+  window.addEventListener("keydown", (e) => {
+    if (typeof _activeEditorKeyHandler === "function") {
+      try { _activeEditorKeyHandler(e); } catch (_) {}
+    }
+  }, true);
+} catch (_) {}
+
 const F_MEDIA = [
   ["视频", "*.mp4 *.mov *.webm *.mkv *.m4v"],
   ["音频", "*.wav *.mp3 *.flac *.ogg *.m4a"],
@@ -38,6 +53,47 @@ export function createEditorPanel(ctx) {
   };
   const trackDur = (arr) => (arr || []).reduce((a, c) => a + effDur(c), 0);
 
+  // ---------- 丝滑剪辑基础设施 ----------
+  // 1) 片段对象 → DOM 元素（拖拽/异步探时长后只改这一个元素，不做全量重绘）
+  const _clipEls = new Map();
+  // 2) 全局共用一个裁剪浮层提示（拖拽时显示实时入出点/时长）
+  let _trimTip = null;
+  const getTrimTip = () => {
+    if (_trimTip && _trimTip.isConnected) return _trimTip;
+    _trimTip = document.createElement("div");
+    _trimTip.className = "ed-trimtip";
+    document.body.appendChild(_trimTip);
+    return _trimTip;
+  };
+  // 3) rAF 节流器：一次屏幕刷新最多处理一次 pointermove，避免高频事件拖垮主线程
+  const rafThrottle = (fn) => {
+    let queued = false, lastArg = null;
+    return (arg) => {
+      lastArg = arg;
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; fn(lastArg); });
+    };
+  };
+  const clipW = (c) => Math.max(46, Math.min(460, Math.round(effDur(c) * PPS)));
+  const fmt = (s) => (s == null ? "?" : Number(s).toFixed(1) + "s");
+  const MINLEN = 0.1;   // 片段最短时长（秒），裁剪拖拽的下限
+  const clampSpeed = (c) => Math.max(0.5, Math.min(2, Number(c && c.speed) || 1));
+  // 探时长结果缓存：重复入轨不重复请求 ffprobe（「全部入轨」不再卡）
+  const probeCache = new Map();
+  // 预览视频当前对应哪个 V1 片段 + 它的前置累计时长（用于播放时播放头实时跟随）
+  let _previewClip = null, _previewAcc = 0;
+  // 只刷新单个片段的宽度 + 时长读数（<1ms，不触碰其它 DOM）
+  const updateClipVisual = (c) => {
+    const el = _clipEls.get(c);
+    if (!el) return;
+    const w = clipW(c);
+    el.style.width = w + "px";
+    el.style.minWidth = w + "px";
+    const cd = el.querySelector(".cd");
+    if (cd) cd.textContent = fmt(effDur(c));
+  };
+
   // ---------- 撤销 / 重做（剪映式 Ctrl+Z / Ctrl+Shift+Z） ----------
   const _snap = () => JSON.stringify({ v1, v2, a1 });
   const undoStack = [];
@@ -54,7 +110,7 @@ export function createEditorPanel(ctx) {
     (o.v2 || []).forEach((x) => v2.push(x));
     (o.a1 || []).forEach((x) => a1.push(x));
     selected = null;
-    renderTracks(); renderEdit(); renderMats();
+    renderTracks(); renderEdit(); syncMatSel();
   };
   const doUndo = () => {
     if (!undoStack.length) { ctx.toast("没有可撤销的操作"); return; }
@@ -191,11 +247,21 @@ export function createEditorPanel(ctx) {
     playSeg(va, 0);
   };
 
+  // 记住预览当前放的是 V1 上的哪一段（播放时播放头才能跟着走）
+  const markPreviewClip = (rel) => {
+    let acc = 0;
+    _previewClip = null; _previewAcc = 0;
+    for (const c of v1) {
+      if (c && c.rel === rel) { _previewClip = c; _previewAcc = acc; break; }
+      acc += effDur(c);
+    }
+  };
   const showVideo = (rel) => {
     if (!rel) return;
     video.src = relToViewUrl(rel);
     video.style.display = "block";
     ph.style.display = "none";
+    markPreviewClip(rel);
   };
   const showNote = (t) => {
     ph.textContent = t;
@@ -250,8 +316,11 @@ export function createEditorPanel(ctx) {
   };
 
   const delLbl = h("span", { class: "muted" });
+  const _matCards = new Map();   // rel → { card, m }：选中态只切类名，不重建缩略图
   const renderMats = () => {
+    const sc = matsRow.scrollLeft;          // 保留滚动位置（重建不再"跳回开头"）
     clear(matsRow);
+    _matCards.clear();
     const shown = materials.filter((m) => tab === "all" || m.kind === tab);
     matCount.textContent = `${shown.length} 个素材`;
     for (const m of shown) {
@@ -268,14 +337,20 @@ export function createEditorPanel(ctx) {
       card.style.position = "relative";
       card.appendChild(ck);
       matsRow.appendChild(card);
+      _matCards.set(m.rel, { card, m });
     }
+    matsRow.scrollLeft = sc;
+  };
+  // 只同步"选中"样式：素材上百个时点一下不再重建整排缩略图（原实现每次点击都重建 → 卡）
+  const syncMatSel = () => {
+    for (const rec of _matCards.values()) rec.card.classList.toggle("sel", !!(selected && selected.obj === rec.m));
   };
 
   const pickMaterial = (m) => {
     if (m.kind === "video") showVideo(m.rel);
     else showNote("音频：" + m.name + "（可加入 A1 音频轨）");
     selected = { row: null, idx: -1, obj: m };
-    renderMats();
+    syncMatSel();
     renderEdit();
   };
 
@@ -285,9 +360,15 @@ export function createEditorPanel(ctx) {
     background: "rgba(8,14,28,.6)", border: "1px solid #1d2b44", borderRadius: 6, overflow: "hidden", cursor: "pointer" } });
   const playheadEl = h("div", { style: { position: "absolute", top: 0, bottom: 0, width: 2, background: "#ffcf6b",
     boxShadow: "0 0 6px #ffcf6b", pointerEvents: "none", left: 0 } });
+  let _rulerTotal = -1;   // 缓存：总时长没变就不重建刻度（拖拽时省掉上百个 DOM 节点）
   const renderRuler = () => {
-    clear(ruler);
     const total = Math.max(4, Math.max(trackDur(v1), trackDur(v2)));
+    if (Math.abs(total - _rulerTotal) < 1e-6) {
+      playheadEl.style.left = Math.round(playheadSec * PPS) + "px";
+      return;
+    }
+    _rulerTotal = total;
+    clear(ruler);
     const px = Math.min(4000, Math.round(total * PPS));
     for (let t = 0; t <= total + 0.001; t += 1) {
       const x = t * PPS;
@@ -301,48 +382,101 @@ export function createEditorPanel(ctx) {
     playheadEl.style.left = Math.round(playheadSec * PPS) + "px";
     ruler.style.minWidth = px + "px";
   };
-  ruler.onclick = (e) => {
-    const r = ruler.getBoundingClientRect();
-    playheadSec = Math.max(0, snapTo((e.clientX - r.left) / PPS));
+
+  // ---- 播放头：只改 left（零重排），拖动时 rAF 节流跟手 ----
+  const setPlayhead = (sec, seekPreview) => {
+    playheadSec = Math.max(0, snapTo(sec));
     playheadEl.style.left = Math.round(playheadSec * PPS) + "px";
-    // 播放头落到 V1 上时同步把预览 seek 到对应位置
+    if (!seekPreview) return;
     let acc = 0;
     for (const c of v1) {
       const d = effDur(c);
       if (playheadSec <= acc + d + 1e-6) {
         if (video.src && c.rel) {
-          const local = (c.in || 0) + (playheadSec - acc) * Math.max(0.5, Math.min(2, Number(c.speed) || 1));
+          const local = (c.in || 0) + (playheadSec - acc) * clampSpeed(c);
           try { video.currentTime = local; } catch (_) {}
         }
         break;
       }
       acc += d;
     }
-    ctx.toast(`播放头 ${playheadSec.toFixed(1)}s`);
   };
+  const _scrubTip = () => getTrimTip();
+  ruler.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const tip = _scrubTip();
+    const r0 = ruler.getBoundingClientRect();
+    const px2sec = (clientX) => Math.max(0, (clientX - r0.left) / PPS);
+    const paintHead = rafThrottle((clientX) => {
+      setPlayhead(px2sec(clientX), false);
+      tip.textContent = `播放头 ${playheadSec.toFixed(1)}s`;
+      tip.style.left = clientX + "px";
+      tip.style.top = (r0.top - 6) + "px";
+      tip.classList.add("on");
+    });
+    setPlayhead(px2sec(e.clientX), false);
+    ruler.classList.add("dragging");
+    const mv = (e2) => paintHead(e2.clientX);
+    const up = (e2) => {
+      document.removeEventListener("pointermove", mv);
+      document.removeEventListener("pointerup", up);
+      document.removeEventListener("pointercancel", up);
+      ruler.classList.remove("dragging");
+      tip.classList.remove("on");
+      setPlayhead(playheadSec, true);      // 松手才真的 seek 预览（拖动期间不 seek，避免解码抖动）
+      ctx.toast(`播放头 ${playheadSec.toFixed(1)}s`);
+    };
+    document.addEventListener("pointermove", mv, { passive: true });
+    document.addEventListener("pointerup", up);
+    document.addEventListener("pointercancel", up);
+  });
 
   const rowV1 = h("div", { class: "ed-track" });
   const rowV2 = h("div", { class: "ed-track" });
   const rowA1 = h("div", { class: "ed-track" });
   let dragFrom = null;
 
+  // 探时长（带缓存）：回来后只刷新该片段宽度 + 标尺（总时长没变则连标尺也不重建）
+  const probeDur = (clip) => {
+    if (!clip || !clip.rel) return;
+    if (probeCache.has(clip.rel)) { clip.dur = probeCache.get(clip.rel); updateClipVisual(clip); renderRuler(); return; }
+    ctx.api.probeEditor(clip.rel).then((p) => {
+      const d = (p && p.duration != null) ? Number(p.duration) : null;
+      if (d != null) probeCache.set(clip.rel, d);
+      clip.dur = d;
+      updateClipVisual(clip);
+      renderRuler();
+    }).catch(() => { clip.dur = null; });
+  };
+
   const addToTrack = (arr, m) => {
-    pushHistory();
+    if (!m) return;
     if (arr === a1) {
       if (m.kind !== "audio") { ctx.toast("音频轨只能放音频素材", true); return; }
     } else if (m.kind !== "video") { ctx.toast("视频轨只能放视频素材", true); return; }
+    pushHistory();
     const clip = { rel: m.rel, name: m.name, dur: null, in: null, out: null };
-    if (m.kind === "video") {
-      ctx.api.probeEditor(m.rel).then((p) => { clip.dur = p.duration; renderTracks(); }).catch(() => { clip.dur = null; });
-    }
     arr.push(clip);
     renderTracks();
+    if (m.kind === "video") probeDur(clip);
   };
 
-  const fmt = (s) => (s == null ? "?" : Number(s).toFixed(1) + "s");
+  // 批量入轨：只做 1 次全量重绘 + 异步补时长（「⏩ 全部入轨」不再逐个重绘卡顿）
+  const addManyToTrack = (arr, list) => {
+    const ok = (list || []).filter((m) => m && m.kind === "video");
+    if (!ok.length) return 0;
+    pushHistory();
+    const clips = ok.map((m) => ({ rel: m.rel, name: m.name, dur: null, in: null, out: null }));
+    arr.push(...clips);
+    renderTracks();
+    clips.forEach(probeDur);
+    return clips.length;
+  };
 
   const renderTracks = () => {
     clear(rowV1); clear(rowV2); clear(rowA1);
+    _clipEls.clear();
     [[v1, rowV1, "V1 视频主轨"], [v2, rowV2, "V2 视频副轨"], [a1, rowA1, "A1 音频轨"]].forEach(([arr, row, label]) => {
       row.appendChild(h("div", { class: "ed-track-lbl" }, label));
       row.ondragover = (e) => e.preventDefault();
@@ -358,12 +492,12 @@ export function createEditorPanel(ctx) {
       arr.forEach((c, i) => {
         if (c === null) return;
         const trimmed = (c.in != null || c.out != null) ? " ✂" : ""; // 有裁剪标记
-        const spd = Math.max(0.5, Math.min(2, Number(c.speed) || 1));
+        const spd = clampSpeed(c);
         const badge = [];
         if (spd !== 1) badge.push(spd + "×");
         if (c.muted) badge.push("🔇");
         else if (c.volume != null && Math.abs(Number(c.volume) - 1) > 1e-6) badge.push("🔊" + c.volume);
-        const wpx = Math.max(46, Math.min(460, Math.round(effDur(c) * PPS)));
+        const wpx = clipW(c);
         const el = h("div", {
           class: "ed-clip" + (selected && selected.row === arr && selected.idx === i ? " sel" : ""),
           draggable: "true",
@@ -379,7 +513,8 @@ export function createEditorPanel(ctx) {
           // 左右裁剪把手（拖拽改入出点，吸附 0.1s）——剪映式边缘拖拽
           h("div", { class: "ed-handle", style: { position: "absolute", left: 0, top: 0, bottom: 0, width: 6, cursor: "ew-resize", background: "rgba(255,207,107,.35)" }, title: "拖拽改「入点」" }),
           h("div", { class: "ed-handle", style: { position: "absolute", right: 0, top: 0, bottom: 0, width: 6, cursor: "ew-resize", background: "rgba(255,207,107,.35)" }, title: "拖拽改「出点」" }));
-        // 绑定裁剪拖拽
+        _clipEls.set(c, el);
+        // 绑定裁剪拖拽（丝滑版：pointermove 只改被拖片段宽度 + 浮层提示，零全量重绘）
         const hd = el.querySelectorAll(".ed-handle");
         const bindTrim = (node, side) => {
           node.addEventListener("pointerdown", (ev) => {
@@ -387,25 +522,54 @@ export function createEditorPanel(ctx) {
             if (!c.dur) { ctx.toast("该素材缺少时长信息，无法拖拽裁剪（可用下方入点/出点输入框）", true); return; }
             pushHistory();
             const startX = ev.clientX;
-            const in0 = c.in || 0;
+            const in0 = c.in != null ? c.in : 0;
             const out0 = (c.out != null ? c.out : c.dur);
-            node.setPointerCapture && node.setPointerCapture(ev.pointerId);
-            const move = (e2) => {
+            const MAXLEN = c.dur;
+            const tip = getTrimTip();
+            let lastEv = null;
+
+            // —— 每个动画帧只做：算新入出点 → 写 1 个宽度 → 更新浮层文字 ——
+            const paint = () => {
+              const e2 = lastEv;
+              if (!e2) return;
               const ds = ((e2.clientX - startX) / PPS) * spd;   // 像素 → 秒（按变速折算到源时间）
               if (side === "in") {
-                c.in = Math.max(0, Math.min(snapTo(in0 + ds), out0 - 0.2));
+                c.in = Math.max(0, Math.min(snapTo(in0 + ds), out0 - MINLEN));
               } else {
-                c.out = Math.max(in0 + 0.2, Math.min(snapTo(out0 + ds), c.dur));
+                c.out = Math.max(in0 + MINLEN, Math.min(snapTo(out0 + ds), MAXLEN));
               }
+              updateClipVisual(c);
+              tip.textContent =
+                `${side === "in" ? "入点" : "出点"} ${((side === "in" ? c.in : c.out) || 0).toFixed(2)}s` +
+                ` · 时长 ${effDur(c).toFixed(2)}s`;
+              tip.style.left = e2.clientX + "px";
+              tip.style.top = e2.clientY + "px";
+              tip.classList.add("on");
             };
+            const onMove = rafThrottle((e2) => { lastEv = e2; paint(); });
+
+            el.classList.add("trimming");
+            node.classList.add("hot");
+            row.classList.add("dragging");
+            try { node.setPointerCapture(ev.pointerId); } catch (_) {}
             const up = () => {
-              document.removeEventListener("pointermove", move);
+              document.removeEventListener("pointermove", onMove);
               document.removeEventListener("pointerup", up);
+              document.removeEventListener("pointercancel", up);
+              el.classList.remove("trimming");
+              node.classList.remove("hot");
+              row.classList.remove("dragging");
+              tip.classList.remove("on");
+              // 收尾才做一次全量重绘（标尺/吸附后的最终宽度）
               renderTracks(); renderEdit();
               if (selected && selected.obj === c) { inIn.value = c.in == null ? "" : c.in; outIn.value = c.out == null ? "" : c.out; }
             };
-            document.addEventListener("pointermove", move);
+            document.addEventListener("pointermove", onMove, { passive: true });
             document.addEventListener("pointerup", up);
+            document.addEventListener("pointercancel", up);
+            // 立即给一次反馈（不移动也能看到提示）
+            lastEv = { clientX: ev.clientX, clientY: ev.clientY };
+            paint();
           });
         };
         bindTrim(hd[0], "in");
@@ -446,6 +610,56 @@ export function createEditorPanel(ctx) {
   const editBar = h("div", { class: "ed-editbar", style: { display: "none" } });
   const inIn = h("input", { class: "input", type: "number", step: 0.1, min: 0, style: { width: 88 }, placeholder: "入点s" });
   const outIn = h("input", { class: "input", type: "number", step: 0.1, min: 0, style: { width: 88 }, placeholder: "出点s" });
+
+  // ---------- 片段操作（按钮 + 快捷键共用同一套实现，行为永远一致） ----------
+  const splitSelected = () => {
+    if (!selected || !selected.row) { ctx.toast("先选中一个片段", true); return; }
+    const c = selected.obj;
+    const t = playheadSec > 0 ? playheadSec : (video.currentTime || 0);
+    const base = c.in || 0;
+    const stop = (c.out != null && c.dur != null) ? Math.min(c.out, c.dur) : (c.out != null ? c.out : c.dur);
+    const span = (stop != null) ? (stop - base) : null;
+    const at = t - base;
+    if (at <= MINLEN || (span != null && at >= span - MINLEN)) { ctx.toast("播放头需在片段内部才能分割（先拖动预览进度条或标尺）", true); return; }
+    pushHistory();
+    const tail = { rel: c.rel, name: c.name, dur: c.dur, in: base + at, out: c.out,
+                   speed: c.speed, volume: c.volume, muted: c.muted };
+    c.out = base + at;
+    selected.row.splice(selected.idx + 1, 0, tail);
+    selected = null;
+    renderTracks(); renderEdit(); syncMatSel();
+    ctx.toast(`✂ 已在 ${at.toFixed(1)}s 处分割为两段`);
+  };
+  const duplicateSelected = () => {
+    if (!selected || !selected.row) { ctx.toast("先选中一个片段", true); return; }
+    pushHistory();
+    selected.row.splice(selected.idx + 1, 0, { ...selected.obj });
+    renderTracks();
+    ctx.toast("已复制片段");
+  };
+  const deleteSelected = () => {
+    if (!selected || !selected.row) { ctx.toast("先选中一个片段", true); return; }
+    pushHistory();
+    selected.row.splice(selected.idx, 1);
+    selected = null;
+    renderTracks(); renderEdit(); syncMatSel();
+  };
+  const nudgeSelected = (side, delta) => {
+    if (!selected || !selected.row) return false;
+    const c = selected.obj;
+    if (c.dur == null) return false;
+    const base = c.in || 0;
+    const out = (c.out != null ? c.out : c.dur);
+    pushHistory();
+    if (side === "in") c.in = Math.max(0, Math.min(snapTo(base + delta), out - MINLEN));
+    else c.out = Math.max(base + MINLEN, Math.min(snapTo(out + delta), c.dur));
+    updateClipVisual(c); renderRuler();
+    if (inIn) inIn.value = c.in == null ? "" : c.in;
+    if (outIn) outIn.value = c.out == null ? "" : c.out;
+    ctx.toast(`${side === "in" ? "入点" : "出点"} → ${((side === "in" ? c.in : c.out) || 0).toFixed(2)}s`);
+    return true;
+  };
+
   const renderEdit = () => {
     clear(editBar);
     if (!selected || !selected.row) { editBar.style.display = "none"; return; }
@@ -490,30 +704,9 @@ export function createEditorPanel(ctx) {
     editBar.appendChild(volLbl);
     editBar.appendChild(h("label", { class: "row", style: { gap: 3, fontSize: 11, cursor: "pointer" } }, muteCk, "静音"));
     // 分割：在播放头位置把选中片段切成两段
-    editBar.appendChild(h("button", { class: "btn", style: { padding: "4px 10px" }, title: "在播放头位置分割片段（快捷键 S）", onclick: () => {
-      const c = selected.obj;
-      const t = playheadSec > 0 ? playheadSec : (video.currentTime || 0);
-      const base = c.in || 0;
-      const effDur = c.dur != null ? (c.dur - base) : null;
-      const splitAt = t - base;
-      if (splitAt <= 0.08 || (effDur != null && splitAt >= effDur - 0.08)) { ctx.toast("播放头需在片段内部才能分割（先拖动预览进度条）", true); return; }
-      pushHistory();
-      const tail = { rel: c.rel, name: c.name, dur: c.dur, in: base + splitAt, out: c.out,
-                     speed: c.speed, volume: c.volume, muted: c.muted };
-      c.out = base + splitAt;
-      selected.row.splice(selected.idx + 1, 0, tail);
-      selected = null;
-      renderTracks(); renderEdit();
-      ctx.toast("已分割为两段");
-    } }, "✂ 分割"));
+    editBar.appendChild(h("button", { class: "btn", style: { padding: "4px 10px" }, title: "在播放头位置分割片段（快捷键 S）", onclick: () => splitSelected() }, "✂ 分割"));
     // 复制：复制选中片段到同轨道后一位
-    editBar.appendChild(h("button", { class: "btn", style: { padding: "4px 10px" }, title: "复制选中片段（Ctrl+D）", onclick: () => {
-      const c = selected.obj;
-      pushHistory();
-      selected.row.splice(selected.idx + 1, 0, { ...c });
-      renderTracks();
-      ctx.toast("已复制片段");
-    } }, "⧉ 复制"));
+    editBar.appendChild(h("button", { class: "btn", style: { padding: "4px 10px" }, title: "复制选中片段（Ctrl+D）", onclick: () => duplicateSelected() }, "⧉ 复制"));
     // 排序：左移 / 右移（不用拖拽的快速排序）
     editBar.appendChild(h("button", { class: "btn", style: { padding: "4px 10px" }, title: "左移一位", onclick: () => {
       const { row, idx } = selected;
@@ -523,8 +716,8 @@ export function createEditorPanel(ctx) {
       const { row, idx } = selected;
       if (idx < row.length - 1) { [row[idx], row[idx + 1]] = [row[idx + 1], row[idx]]; selected.idx = idx + 1; renderTracks(); renderEdit(); }
     } }, "右移 ▶"));
-    editBar.appendChild(h("button", { class: "btn", style: { padding: "4px 10px" }, onclick: () => { pushHistory(); selected.row.splice(selected.idx, 1); selected = null; renderTracks(); renderEdit(); } }, "✕ 删除片段"));
-    editBar.appendChild(h("button", { class: "btn", style: { padding: "4px 10px" }, onclick: () => { selected = null; renderMats(); renderTracks(); renderEdit(); } }, "取消"));
+    editBar.appendChild(h("button", { class: "btn", style: { padding: "4px 10px" }, title: "删除选中片段（Delete）", onclick: () => deleteSelected() }, "✕ 删除片段"));
+    editBar.appendChild(h("button", { class: "btn", style: { padding: "4px 10px" }, onclick: () => { selected = null; syncMatSel(); renderTracks(); renderEdit(); } }, "取消"));
   };
 
   // ---- 合成（V1→V2 顺序 + A1 音频轨）----
@@ -673,8 +866,8 @@ export function createEditorPanel(ctx) {
     onclick: () => {
       const vids = materials.filter((m) => m.kind === "video" && (tab === "all" || tab === "video"));
       if (!vids.length) { ctx.toast("素材区没有视频素材", true); return; }
-      vids.forEach((m) => addToTrack(v1, m));
-      ctx.toast(`已把 ${vids.length} 个视频按顺序加入 V1 主轨`);
+      const n = addManyToTrack(v1, vids);   // 批量：只重绘 1 次
+      ctx.toast(`已把 ${n} 个视频按顺序加入 V1 主轨`);
     },
   }, "⏩ 全部入轨");
   const upBtn = h("button", {
@@ -735,5 +928,61 @@ export function createEditorPanel(ctx) {
   tabSel.onchange = () => { tab = tabSel.value; renderMats(); };
   refreshMaterials();
   loadMusic();
+
+  // ---- 播放时播放头实时跟随（rAF 节流，只改 left，不触发重排）----
+  const _followHead = rafThrottle(() => {
+    if (!_previewClip || video.paused) return;
+    const local = Math.max(0, (video.currentTime || 0) - (_previewClip.in || 0));
+    setPlayhead(_previewAcc + local / clampSpeed(_previewClip), false);
+  });
+  video.addEventListener("timeupdate", _followHead);
+  video.addEventListener("seeked", _followHead);
+
+  // ---- 快捷键（剪映式）：与按钮共用同一套实现 ----
+  //   Space 播放/暂停 · S 在播放头分割 · Delete/Backspace 删除片段 · Ctrl+D 复制
+  //   Ctrl+Z / Ctrl+Shift+Z 撤销重做 · ←/→ 播放头 ±0.1s（Shift 为 ±1s）· Alt+←/→ 微调入点
+  //   A 音频轨 / Esc 取消选中
+  const _onKey = (e) => {
+    if (!el.isConnected) return;                                  // 面板没激活 → 不抢按键
+    // shadow DOM 会把 event.target 重定向成宿主元素 → 用 composedPath 拿真实目标，
+    // 否则在面板里的输入框打字会被当成快捷键（例如打 "s" 触发分割）。
+    const t = (typeof e.composedPath === "function" && e.composedPath()[0]) || e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ""))) return;
+    const k = (e.key || "").toLowerCase();
+    const mod = e.ctrlKey || e.metaKey;
+    // 吃掉按键：本面板激活时这些键归剪辑面板所有。
+    // 必须 stopImmediatePropagation —— 否则 Ctrl+Z 会同时触发 ComfyUI 自己的「撤销工作流」，
+    // 把 MRBoard 节点从画布上撤掉（表现为面板 DOM 被拆掉、后续测量全 0）。
+    const grab = (ev) => { ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation && ev.stopImmediatePropagation(); };
+    if (mod && k === "z") { grab(e); if (e.shiftKey) doRedo(); else doUndo(); return; }
+    if (mod && k === "y") { grab(e); doRedo(); return; }
+    if (mod && k === "d") { grab(e); duplicateSelected(); return; }
+    if (mod && k === "s") { grab(e); composeBtn.click(); return; }
+    if (e.code === "Space") {
+      if (!video.src) return;
+      grab(e);
+      if (video.paused) video.play().catch(() => {}); else video.pause();
+      return;
+    }
+    if (k === "s" && !mod) { grab(e); splitSelected(); return; }
+    if (e.key === "Delete" || e.key === "Backspace") { if (selected) { grab(e); deleteSelected(); } return; }
+    if (e.key === "Escape") { if (selected) { grab(e); selected = null; syncMatSel(); renderTracks(); renderEdit(); } return; }
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      const step = e.shiftKey ? 1 : 0.1;
+      const d = e.key === "ArrowLeft" ? -step : step;
+      // Alt + ←/→：微调选中片段的「入点」；否则一律移动播放头（剪映习惯）
+      if (e.altKey && selected && selected.obj) { grab(e); if (nudgeSelected("in", d)) return; }
+      grab(e);
+      setPlayhead(playheadSec + d, true);
+      return;
+    }
+  };
+  // 用 window 捕获阶段注册：ComfyUI 自己也在 window 捕获阶段抢方向键/Ctrl+Z，
+  // 冒泡阶段会晚于它。捕获阶段先拿到 + composedPath 拿真实目标，快捷键才稳定生效。
+  // 另外把这个 handler 挂到模块级护栏上（模块加载期就抢注了 window 捕获），双保险。
+  _activeEditorKeyHandler = _onKey;
+  window.addEventListener("keydown", _onKey, true);
+  _prevKeys = _onKey;   // 记录本次绑定（面板对象全局只创建一次；isConnected 守卫保证切走后面板不抢按键）
+
   return { el, update: refreshMaterials };
 }

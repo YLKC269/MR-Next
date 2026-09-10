@@ -923,6 +923,27 @@ _DEF_SECTION_HEADERS = {
 }
 _DEF_HEADER_LEAD_RE = re.compile(r"^(?:#{1,6}\s*)?(?:[\[【]\s*)?(?:\*\*\s*)?")
 _DEF_HEADER_TAIL_RE = re.compile(r"(?:\s*[\]】])?(?:\s*\*\*)?\s*[:：]?\s*$")
+# 名字里含这些词 → 是"属性说明行"而不是具体角色/场景（如「角色之间的关系：…」）
+_DEF_NAME_BAD_WORD = re.compile(
+    r"之间|关系|设定|列表|介绍|说明|描述|定义|特点|性格|背景|命运|作用|态度|感情|心理|动机|"
+    r"要求|注意|参考|服装|服饰|外貌|外观|长相|形象|年龄|身高|体型|声音|风格|样式|画风")
+
+
+def _def_name_ok(name):
+    """名字是否像一个具体角色/场景名（挡掉属性说明行）。"""
+    s = (name or "").strip()
+    return bool(s) and not _DEF_NAME_BAD_WORD.search(s)
+
+
+# 名字/描述里出现这些词 → 判为"场景"（与前端 prefix_parser 的 SCENE_NAME_HINT 保持同源语义）
+_SCENE_NAME_HINT = re.compile(
+    r"幕布|背景|环境|场景|plate|scene|setting|石室|石廊|库房|大街|街道|街头|小巷|巷子|路口|"
+    r"客厅|卧室|厨房|卫生间|浴室|书房|餐厅|酒吧|咖啡|茶馆|办公室|会议室|教室|走廊|楼道|楼梯|"
+    r"天台|阳台|庭院|院子|花园|公园|广场|大厅|大堂|车站|地铁|机场|码头|医院|学校|大学|超市|"
+    r"商场|市场|仓库|车库|地下室|电梯|教堂|寺庙|宫殿|城堡|村庄|小镇|城市|森林|树林|沙漠|"
+    r"海滩|海边|湖边|河边|山谷|山顶|雪原|废墟|战场|营房|飞船|驾驶舱|太空|星际|雨夜|清晨|"
+    r"黄昏|夜晚|室内|室外|店内|房内|楼顶|桥上|车里|车内|门口|门外|山路|山道|房间|殿堂|院|宫|殿|府|厅",
+    re.IGNORECASE)
 
 
 def _extract_defs(text):
@@ -944,14 +965,18 @@ def _extract_defs(text):
         if core in _DEF_SECTION_HEADERS:
             cur_section = _DEF_SECTION_HEADERS[core]
             continue
-        m = re.match(r"(?:角色|人物|role)\s*[:：]?\s*(.+)", line, re.IGNORECASE)
+        m = re.match(r"(?:角色|人物|role)\s*\d{0,2}\s*[-－—–:：]?\s*(.+)", line, re.IGNORECASE)
         if m and m.group(1).strip():
-            roles.append(_parse_def(m.group(1).strip()))
-            continue
-        m = re.match(r"(?:场景|scene|地点|环境)\s*[:：]?\s*(.+)", line, re.IGNORECASE)
+            d = _parse_def(m.group(1).strip())
+            if _def_name_ok(d.get("name")):
+                roles.append(d)
+                continue
+        m = re.match(r"(?:场景|scene|地点|环境)\s*\d{0,2}\s*[-－—–:：]?\s*(.+)", line, re.IGNORECASE)
         if m and m.group(1).strip():
-            scenes.extend(_split_multi_defs(m.group(1).strip()))
-            continue
+            got = [d for d in _split_multi_defs(m.group(1).strip()) if _def_name_ok(d.get("name"))]
+            if got:
+                scenes.extend(got)
+                continue
         # 段落内「名字：描述」行
         if cur_section:
             m = re.match(r"^(.+?)\s*[:：]\s*(.+)$", line)
@@ -963,7 +988,8 @@ def _extract_defs(text):
                     name = re.sub(r'\s*\d+\s*$', '', name)  # 去掉末尾数字
                     name = name.strip()
                     d = {"name": name, "desc": desc, "full": (name + "，" + desc) if desc else name}
-                    (roles if cur_section == "role" else scenes).append(d)
+                    if _def_name_ok(name):
+                        (roles if cur_section == "role" else scenes).append(d)
                     continue
             (roles if cur_section == "role" else scenes).append({"name": line, "desc": "", "full": line})
     return roles, scenes
@@ -980,6 +1006,41 @@ def _parse_assets_text(text):
     """
     lines = (text or "").split("\n")
     roles, scenes, style_parts = [], [], []
+
+    def _lookahead_def(idx, nm0=""):
+        """从 idx+1 起读「名称：X」「描述：Y」或裸名字行（标签独占一行的写法）。
+        返回 (name, desc, next_idx)。"""
+        nm, desc = (nm0 or "").strip(), ""
+        j = idx + 1
+        while j < len(lines):
+            nxt = lines[j].strip()
+            # 「名称：陆沉」→ 补名字（此前只认「描述：」，导致名字为空）
+            nm2 = re.search(r"\*{0,2}(?:名称|名字|姓名|角色名|场景名)\*{0,2}\s*[:：]\s*(.+)", nxt)
+            if nm2 and not nm:
+                nm = nm2.group(1).replace("`", "").replace("*", "").strip()
+                j += 1
+                continue
+            dm2 = re.search(r"\*{0,2}(?:特征描述|描述|外观)\*{0,2}\s*[:：]?\s*(.+)", nxt, re.IGNORECASE)
+            if dm2:
+                desc = dm2.group(1).replace("`", "").replace("*", "").strip().rstrip("。.")
+                j += 1
+                break
+            if re.search(r"<\s*(?:Subject|Picture|Style)", nxt, re.IGNORECASE):
+                break
+            # 裸「名字：描述」行
+            kv = re.match(r"^(.{1,24}?)\s*[：:]\s*(.+)$", nxt)
+            if kv and not nm:
+                nm = kv.group(1).strip()
+                desc = kv.group(2).replace("`", "").replace("*", "").strip().rstrip("。.")
+                j += 1
+                break
+            # 裸名字行（`<Subject 2>` 换行后直接写名字）
+            if not nm and nxt and "：" not in nxt and ":" not in nxt and len(nxt) <= 24:
+                nm = nxt
+                j += 1
+                continue
+            j += 1
+        return nm, desc, j
 
     def _subject_at(idx):
         """解析 lines[idx] 的 <Subject N>（兼容 Markdown `* **<Subject N> 名字**` 前缀），
@@ -1006,22 +1067,15 @@ def _parse_assets_text(text):
             if candidate_name and candidate_desc and len(candidate_name) <= 20:
                 return {"name": candidate_name, "desc": candidate_desc,
                         "full": (candidate_name + "，" + candidate_desc) if candidate_desc else candidate_name}, idx + 1
-        # 多行格式：名字在标签后，描述在后续行
-        # 去英文括号 + Markdown 粗体/反引号/列表符残留
-        nm = re.sub(r"\s*[（(][^）)]*[）)]", "", raw)
-        nm = nm.replace("`", "").replace("*", "").strip(" -－:：")
-        desc = ""
-        j = idx + 1
-        while j < len(lines):
-            nxt = lines[j].strip()
-            dm2 = re.search(r"\*{0,2}(?:特征描述|描述|外观)\*{0,2}\s*[:：]?\s*(.+)", nxt, re.IGNORECASE)
-            if dm2:
-                desc = dm2.group(1).replace("`", "").replace("*", "").strip().rstrip("。.")
-                j += 1
-                break
-            if re.search(r"<\s*(?:Subject|Picture|Style)", nxt, re.IGNORECASE):
-                break
-            j += 1
+        # 同行内容：「名字：描述」/「名字，描述」→ 用 _parse_def 切分（名字只取第一个分隔符前）
+        raw_clean = raw.replace("`", "").replace("*", "").strip(" -－:：")
+        if raw_clean:
+            d = _parse_def(raw_clean)
+            if d.get("name"):
+                return d, idx + 1
+        nm, desc, j = _lookahead_def(idx, "")
+        if not nm and not desc:
+            return None
         return {"name": nm, "desc": desc, "full": (nm + "，" + desc) if desc else nm}, j
 
     # ---- Pass 1：<Subject N> + <Style 全局> ----
@@ -1066,10 +1120,15 @@ def _parse_assets_text(text):
     # 先用 _parse_picture_template 做一行预处理（拿干净 name + 完整 desc + 判定 role/scene），
     # 再走主流程追加。
     for idx in range(len(lines)):
-        m = re.search(r"`?\s*<\s*Picture\s*(\d+)\s*>\s*`?\s*[:：]?\s*(.+)", lines[idx].strip(), re.IGNORECASE)
+        m = re.search(r"`?\s*<\s*Picture\s*(\d+)\s*>\s*`?\s*[:：]?\s*(.*)", lines[idx].strip(), re.IGNORECASE)
         if not m:
             continue
         raw_tail = (m.group(2) or "").replace("`", "").replace("*", "").strip().rstrip("。.")
+        if not raw_tail:
+            # 标签独占一行 → 名字/描述写在后续行（`<Picture 2>` ⏎ `客厅：昏暗台灯`）
+            _nm, _desc, _ = _lookahead_def(idx, "")
+            if _nm or _desc:
+                raw_tail = (_nm + ("：" + _desc if _desc else "")) if _nm else _desc
         if not raw_tail:
             continue
         nm, desc, kind = _parse_picture_template(raw_tail)
@@ -1111,8 +1170,12 @@ def _parse_assets_text(text):
 
 
 def _parse_def(s):
-    """把「林晚，黑长直发，红风衣」拆成 name=林晚 + desc=黑长直发，红风衣。"""
-    s = s.strip().rstrip("。.")
+    """把「林晚，黑长直发，红风衣」/「林晚：28岁女性，及肩黑发」拆成 name + desc。"""
+    s = str(s or "").strip().rstrip("。.")
+    # 去掉「1」/「1.」/「一、」/「1 - 」这类序号前缀（后面必须跟分隔符或空白，避免吃掉「3号角色」）
+    s = re.sub(
+        r"^\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?=[-－—–.、)）:：\s]|$)\s*[-－—–.、)）:：]?\s*",
+        "", s)
     # 优先括号前名字
     name = s
     desc = ""
@@ -1122,7 +1185,16 @@ def _parse_def(s):
             desc = s[len(name):].strip("（）()【】").strip()
             break
     if not desc:
-        for sep in ("，", ",", "、", "："):
+        # 其次是冒号（「名字：描述」是最常见的写法，必须优先于逗号）
+        for sep in ("：", ":"):
+            if sep in name:
+                head, _, tail = name.partition(sep)
+                if head.strip() and tail.strip():
+                    name = head.strip()
+                    desc = tail.strip()
+                    break
+    if not desc:
+        for sep in ("，", ",", "、"):
             if sep in name:
                 head, _, tail = name.partition(sep)
                 if head.strip() and tail.strip():
@@ -1187,12 +1259,12 @@ def _parse_picture_template(tail):
         nm = m.group("name").strip().rstrip("，,。")
         desc = m.group("desc").strip()
         return nm, desc, "role"
-    # 模板 3：简单「名字：描述」—— 按描述里是否含场景词判别
+    # 模板 3：简单「名字：描述」—— 按名字/描述里是否含场景词判别
     m = re.match(r"^(?P<name>[^：:\n]{1,20}?)\s*[：:]\s*(?P<desc>.+)$", s)
     if m:
         nm = m.group("name").strip()
         desc = m.group("desc").strip()
-        kind = "scene" if re.search(r"幕布|背景|环境|场景|plate|scene|setting|石室|石廊|库房|大街|街道|室外|室内|庭院|殿堂|房间|门口|门外|厅|院|宫|殿|府|山路|山道", desc, re.IGNORECASE) else "role"
+        kind = "scene" if _SCENE_NAME_HINT.search(nm + "：" + desc) else "role"
         return nm, desc, kind
     # 模板 4：fallback
     return "", s, None
