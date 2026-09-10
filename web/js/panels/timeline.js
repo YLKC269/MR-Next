@@ -17,6 +17,17 @@ const MODES = [
   { v: "r2v", label: "参考生视频（多参考图→视频）R2V" },
 ];
 const modeLabel = (v) => { const m = MODES.find((x) => x.v === v); return m ? m.label : v; };
+
+// 取当前画布的工作流图（「外部节点接口」扫描用）。
+// ComfyUI 把 app 挂在 window 上；不同版本取不到就返回 null（调用方给提示，不抛错）。
+function liveGraph() {
+  try {
+    const w = typeof window !== "undefined" ? window : null;
+    const a = w ? (w.app || (w.comfyAPI && w.comfyAPI.app && w.comfyAPI.app.app)) : null;
+    if (a && a.graph && typeof a.graph.serialize === "function") return a.graph.serialize();
+  } catch (_) {}
+  return null;
+}
 const MODE_HINT = {
   t2v: "纯文本 → 完整时间线",
   i2v: "首帧 = 本镜 图[0]/视[0]",
@@ -36,7 +47,9 @@ const IMG_CAP = 9;
 const DEFAULT_PARAMS = () => ({
   mode: "t2v",
   model: { unet: "", clip: "", vvae: "", avae: "", lora: "(无)", loraS: 1 },
-  speed: { node: "off", dev: "auto", lora: "(无)", loraS: 1, sage: "disabled", free_vram: true },
+  speed: { node: "off", dev: "auto", lora: "(无)", loraS: 1, sage: "disabled", free_vram: true,
+           // 外部节点接口：external = 画布上检测到的第三方加速类型（非空 → 内置加速自动失效）
+           external: [], forceBuiltin: false, extInfo: null },
   output: {
     // 采样设置（官方 bd_grp_sample）
     cfg: 1, seed: 0, fps: 24, width: 768, height: 1344, ref_size: 864, sec: 5,
@@ -544,7 +557,89 @@ export function createTimelinePanel(ctx) {
       const freeCk = h("label", { class: "row", style: { gap: 5, cursor: "pointer", padding: "4px 6px" } },
         h("input", { type: "checkbox", checked: P.speed.free_vram ? "checked" : null, onchange: (e) => { P.speed.free_vram = e.target.checked; }, style: { accentColor: "#ffd166" } }),
         h("span", { style: { fontSize: 11.5, color: "#bcd3ea" }, title: "整条连跑时每 2 镜自动清理显存缓存，防止长时间连续出片显存累积 OOM" }, "段间清理显存（每2镜）"));
+
+      // ---- 外部节点接口：外接「模型节点」/「第三方加速节点」 ----
+      // 规则：画布上一旦出现第三方加速节点（SageAttention / TeaCache / torch.compile / Nunchaku…），
+      //       本节点的内置加速整体失效（避免双重加速：调度被改两遍 → 画面发灰 / 显存反而爆）。
+      //       外部模型加载器节点可以「采用」——把它们已选好的模型文件名填进本节点设置。
+      const extLbl = h("span", { class: "muted", style: { fontSize: 11 } });
+      const extBox = h("div", { style: { display: "flex", flexDirection: "column", gap: 4, width: "100%" } });
+      const forceCk = h("label", { class: "row", style: { gap: 5, cursor: "pointer", padding: "4px 6px" } },
+        h("input", { type: "checkbox", checked: P.speed.forceBuiltin ? "checked" : null,
+          onchange: (e) => { P.speed.forceBuiltin = e.target.checked; renderExt(P.speed.extInfo); },
+          style: { accentColor: "#ffd166" } }),
+        h("span", { style: { fontSize: 11.5, color: "#bcd3ea" },
+          title: "默认：画布上出现第三方加速节点时，内置加速（BlockSparse / TE-Speed / 蒸馏 LoRA）自动失效。勾上则强制保留内置加速（可能与外部加速重复叠加）。" },
+          "强制启用内置加速（忽略外部节点）"));
+      const renderExt = (info) => {
+        clear(extBox);
+        if (P.speed.forceBuiltin) {
+          extBox.appendChild(h("div", { style: { fontSize: 11, lineHeight: 1.6, color: "#ffd9a8" } },
+            "已勾选「强制启用内置加速」→ 内置加速不会被自动关闭（可能与外部加速节点重复叠加；画面发灰/显存异常时取消勾选）。"));
+        }
+        if (info && info.note) {
+          const bad = !!(info.kinds && info.kinds.length);
+          extBox.appendChild(h("div", { style: { fontSize: 11, lineHeight: 1.6, color: bad ? "#ffb35c" : "#9fb6d0" } }, info.note));
+        }
+        const ROLE_CN = { unet: "UNET", clip: "CLIP", vae: "VAE", lora: "LoRA" };
+        for (const m of ((info && info.models) || [])) {
+          const target = m.role === "unet" ? "unet" : m.role === "clip" ? "clip" : m.role === "lora" ? "lora"
+            : (/audio/i.test(m.value || "") ? "avae" : "vvae");
+          const risky = m.compatible === false;
+          extBox.appendChild(h("div", { class: "row", style: { gap: 6, fontSize: 11.5, color: risky ? "#ffd9a8" : "#cfe0f2" } },
+            h("span", { style: { minWidth: 92, color: "#8fb0d6" } }, `${ROLE_CN[m.role] || m.role} #${m.id}`),
+            h("span", { style: { flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+              title: m.type + " ｜ " + (m.values || []).join(" / ") + (risky ? "\n⚠ 文件名里没有 minimax/h3 字样，可能不是 H3 用的模型" : "") },
+              (risky ? "⚠ " : "") + (m.value || m.type)),
+            h("button", { class: "btn", style: { padding: "2px 8px", fontSize: 11 },
+              title: "把外部节点已经选好的这个模型文件填进本节点设置",
+              onclick: () => {
+                if (risky && !confirm(`这个文件名看起来不是 H3/MiniMax 的模型：\n${m.value}\n\n仍然采用？`)) return;
+                P.model[target] = m.value;
+                ctx.toast(`已采用外部 ${ROLE_CN[m.role] || m.role}：${m.value}`);
+                renderParam();
+              } }, "采用")));
+        }
+        for (const a of ((info && info.accels) || [])) {
+          extBox.appendChild(h("div", { class: "row", style: { gap: 6, fontSize: 11.5, color: "#ffd9a8" } },
+            h("span", { style: { minWidth: 92, color: "#e0b06a" } }, `加速 #${a.id}`),
+            h("span", { style: { flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, `${a.type}（${a.kind}）`),
+            h("span", { class: "muted", style: { fontSize: 11 } }, "内置加速已让路")));
+        }
+      };
+      const scanBtn = h("button", { class: "btn", style: { padding: "5px 10px" },
+        title: "扫描当前画布：外部模型加载器节点 + 第三方加速节点（SageAttention / TeaCache / torch.compile / Nunchaku…）",
+        onclick: async () => {
+          const g = liveGraph();
+          if (!g) { ctx.toast("拿不到当前画布图（app.graph 不可用）", true); return; }
+          scanBtn.disabled = true; extLbl.textContent = "扫描中…";
+          try {
+            const r = await ctx.api.externalNodes(g);
+            if (!r || !r.ok) { ctx.toast((r && r.error) || "扫描失败", true); extLbl.textContent = ""; return; }
+            P.speed.extInfo = r;
+            P.speed.external = r.kinds || [];
+            const had = (P.speed.sage && P.speed.sage !== "disabled") || (P.speed.node && P.speed.node !== "off")
+              || (P.speed.lora && P.speed.lora !== "(无)");
+            if ((r.kinds || []).length && !P.speed.forceBuiltin) {
+              P.speed.sage = "disabled"; P.speed.node = "off"; P.speed.lora = "(无)";
+              ctx.toast(had ? "已外接第三方加速节点 → 内置加速已自动关闭（避免双重加速）"
+                            : "已外接第三方加速节点 → 内置加速保持关闭");
+            } else if (!(r.kinds || []).length) {
+              P.speed.external = [];
+            }
+            extLbl.textContent = `外部模型 ${(r.models || []).length} · 外部加速 ${(r.accels || []).length}`;
+            renderExt(r);
+            renderParam();
+          } catch (e) {
+            extLbl.textContent = ""; ctx.toast("扫描失败: " + e.message, true);
+          } finally { scanBtn.disabled = false; }
+        } }, "🔗 扫描画布外部节点");
+      renderExt(P.speed.extInfo);
       row.append(
+        h("div", { class: "tl-field", style: { gridColumn: "span 6", display: "flex", flexDirection: "column", gap: 6 } },
+          h("div", { class: "tl-flabel", title: "外部模型节点 / 第三方加速节点接口：外接后内置加速自动失效" }, "外部节点（模型 / 加速）"),
+          h("div", { class: "row", style: { gap: 8, flexWrap: "wrap", alignItems: "center" } }, scanBtn, forceCk, extLbl),
+          extBox),
         field("BlockSparse 加速", sageE, "PathchSageAttentionKJ"),
         field("TE-Speed 模式", speedE, "TESpeedMiniMaxH3"),
         field("TE-Speed 设备", devE, "device"),
@@ -824,6 +919,9 @@ export function createTimelinePanel(ctx) {
       speed_lora: P.speed.lora && P.speed.lora !== "(无)" ? P.speed.lora : undefined,
       speed_lora_strength: P.speed.loraS,
       sage_attention: P.speed.sage !== "disabled" ? P.speed.sage : undefined,
+      // 外部节点接口：非空 = 画布上外接了第三方加速 → 后端让内置加速失效（双保险）
+      external_accel: (P.speed.external && P.speed.external.length) ? P.speed.external : undefined,
+      force_builtin_accel: P.speed.forceBuiltin ? true : undefined,
       // —— 声音 / 台词（H3 官方三段式）——
       av_structure: P.audio && P.audio.structure === false ? false : true,
       av_lang: (P.audio && P.audio.lang) || "Chinese",
@@ -1004,6 +1102,8 @@ export function createTimelinePanel(ctx) {
       if (r.ok && r.rel) {
         // 音频护栏回执：步数被自动抬升时明确告知（否则用户以为自己在跑 4 步）
         if (r.audio_note) println(`⚠ ${r.audio_note}`, "#ffb35c");
+        // 外部加速节点回执：告诉用户"内置加速为什么没生效"（外接加速后自动让路）
+        if (r.accel_note) println(`🔗 ${r.accel_note}`, "#9fd0ff");
         // 回显真正送进模型的最终提示词：用户怀疑「不按提示词走」时能一眼核对是不是这里被改过
         if (r.prompt_final) {
           const pf = String(r.prompt_final).replace(/\s+/g, " ").trim();

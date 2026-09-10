@@ -138,6 +138,8 @@ export const StudioAPI = {
   h3Shot: (payload) => postJson("/mrnext/h3/shot", payload),
   // 不出片，只回显 H3 官方三段式组装后的提示词（确认台词识别是否正确）
   h3PromptPreview: (payload) => postJson("/mrnext/h3/prompt_preview", payload),
+  // 扫描工作流图里的「外部模型节点 / 第三方加速节点」（外接加速 → 内置加速自动失效）
+  externalNodes: (graph) => postJson("/mrnext/h3/external_nodes", { graph }),
   h3FreeVram: () => postJson("/mrnext/h3/free_vram", {}),
   h3Upscale: (rel, engine, opts) => postJson("/mrnext/h3/upscale_video", { rel, engine, ...(opts || {}) }),
   h3UpscaleStatus: (taskId) => getJson(`/mrnext/h3/upscale_status?task_id=${encodeURIComponent(taskId)}`),

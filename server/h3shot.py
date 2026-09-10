@@ -11,6 +11,7 @@ import asyncio
 import glob
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -27,6 +28,141 @@ TEMPLATE = {
 }
 _GROUP_MODES = {"i2v", "fl2v", "fl2v_tail", "r2v"}
 _H3_PREFIX = "mrnext_h3shot"
+
+# ---------------------------------------------------------------- 外部节点接口
+# 用户可以在画布上自己接「模型节点」和「第三方加速节点」；一旦外接，本节点的内置加速
+# 必须整体让路 —— 内置 sage / TE-Speed / 加速 LoRA 都会改写模型与噪声调度，与外部加速
+# 叠加会变成"双重加速"（调度被改两遍 → 画面发灰、显存反而爆）。
+_ACCEL_OPT_KEYS = ("sage_attention", "sparse_attention", "speed_node", "speed_mode", "speed_lora")
+_ACCEL_OPT_LABEL = {
+    "sage_attention": "BlockSparse/SageAttention",
+    "sparse_attention": "BlockSparse/SageAttention",
+    "speed_node": "TE-Speed 加速节点",
+    "speed_mode": "TE-Speed 加速节点",
+    "speed_lora": "加速 LoRA（蒸馏）",
+}
+_ACCEL_KIND_CN = {
+    "sage": "SageAttention/BlockSparse", "compile": "torch.compile", "cache": "TeaCache/缓存加速",
+    "attention": "FlashAttention/注意力替换", "quant": "量化(Nunchaku/torchao)",
+    "memory": "分块显存优化", "other": "第三方加速",
+}
+
+# 外部节点的分类规则（模型加载器匹配 role，其余命中加速规则算加速节点）
+_EXT_MODEL_RULES = (
+    ("unet", re.compile(r"unet|diffusion|gguf|nunchaku|transformer|model_?loader|checkpoint", re.I)),
+    ("clip", re.compile(r"clip|text_?encoder|t5|llm", re.I)),
+    ("vae", re.compile(r"vae", re.I)),
+    ("lora", re.compile(r"lora", re.I)),
+)
+_EXT_ACCEL_RULES = (
+    ("sage", re.compile(r"sage", re.I)),
+    ("cache", re.compile(r"teacache|deepcache|magcache|first_?block_?cache|cachedit|block_?cache|wavelet", re.I)),
+    ("compile", re.compile(r"compile|inductor", re.I)),
+    ("attention", re.compile(r"flash_?attn|flash_?attention|xformers|attention_?patch|sdpa", re.I)),
+    ("quant", re.compile(r"nunchaku|torchao|fp8_?quant|quantize", re.I)),
+    ("memory", re.compile(r"block_?swap|blockswap|memory_?efficient|tile|offload", re.I)),
+)
+# 本包自己的节点与内置构件：不算"外部"（否则自己扫自己，直接误判）
+_EXT_SELF_RE = re.compile(r"MRBoard|MRNext|MiniMaxH3MemoryEfficientSageAttentionPatch|MiniMaxH3Director|^TESpeedMiniMaxH3$", re.I)
+# 这两类虽含 sage/accelerate 字样，但属于"我们自己内置链路会用到的官方节点"，单独放行
+_EXT_ALLOW_RE = re.compile(r"^(PathchSageAttentionKJ|MiniMaxH3MemoryEfficientSageAttentionPatch)$", re.I)
+
+
+def scan_external_nodes(graph):
+    """扫描工作流图，找出外部「模型节点」与「第三方加速节点」。
+
+    graph 可以是 app.graph.serialize() 的结果（{nodes:[{id,type,widgets_values}...]}），
+    也可以是别处导出的工作流 JSON。返回结构化结果 + 建议（是否让内置加速失效）。
+    """
+    nodes = []
+    if isinstance(graph, dict):
+        nodes = graph.get("nodes") or []
+        if not isinstance(nodes, list):
+            nodes = []
+    models, accels = [], []
+    flat = {}
+    for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        typ = str(n.get("type") or n.get("class_type") or "").strip()
+        if not typ:
+            continue
+        if _EXT_SELF_RE.search(typ) and not _EXT_ALLOW_RE.match(typ):
+            continue
+        nid = str(n.get("id") if n.get("id") is not None else "")
+        vals = n.get("widgets_values")
+        vals = vals if isinstance(vals, list) else []
+        role = ""
+        for k, rx in _EXT_MODEL_RULES:
+            if rx.search(typ):
+                role = k
+                break
+        if role:
+            v0 = str(vals[0]) if vals else ""
+            rec = {"id": nid, "type": typ, "role": role,
+                   "value": v0, "values": [str(x) for x in vals[:4]],
+                   # 文件名看着不像 H3/MiniMax 的 → 前端给个 ⚠ 提示（避免一键采用成 SDXL 之类的模型）
+                   "compatible": (not v0) or bool(re.search(r"minimax|h3", v0, re.I))}
+            models.append(rec)
+            if role == "vae" and vals:
+                nm = str(vals[0])
+                if "audio" in nm.lower():
+                    flat.setdefault("audio_vae", nm)
+                else:
+                    flat.setdefault("video_vae", nm)
+            elif role in ("unet", "clip", "lora") and vals:
+                flat.setdefault(role, str(vals[0]))
+            continue
+        for k, rx in _EXT_ACCEL_RULES:
+            if rx.search(typ):
+                accels.append({"id": nid, "type": typ, "kind": k})
+                break
+    kinds = []
+    for a in accels:
+        if a["kind"] not in kinds:
+            kinds.append(a["kind"])
+    note = ""
+    if accels:
+        names = "、".join(_ACCEL_KIND_CN.get(k, k) for k in kinds)
+        note = ("检测到 %d 个外部加速节点（%s）→ 本节点内置加速会自动失效，避免双重加速。"
+                "若你确实要和内置加速叠加，请在「⚡加速」页勾选「强制启用内置加速」。"
+                % (len(accels), names))
+    if models:
+        note += ("" if not note else " ") + ("同时检测到 %d 个外部模型节点，可一键「采用」它们已选的模型文件。" % len(models))
+    return {"models": models, "accels": accels, "kinds": kinds, "flat": flat, "note": note.strip()}
+
+
+def apply_external_accel_gate(opts):
+    """内置加速的"让路"逻辑：外接了加速节点 → 内置加速整体失效。
+
+    返回 (新 opts, note)。note 为 None 表示没有触发让路。
+    """
+    o = dict(opts or {})
+    ext = o.get("external_accel")
+    if isinstance(ext, str):
+        ext = [x for x in re.split(r"[,;\s]+", ext) if x]
+    kinds = [str(x).strip() for x in (ext or []) if str(x).strip()]
+    if not kinds:
+        return o, None
+    cn = "、".join(_ACCEL_KIND_CN.get(k, k) for k in kinds)
+    if o.get("force_builtin_accel"):
+        return o, "已检测到外部加速节点（%s），但你勾选了「强制启用内置加速」→ 内置加速照常生效（可能双重加速）" % cn
+    dropped = []
+    for k in _ACCEL_OPT_KEYS:
+        v = o.get(k)
+        if v is None or v == "" or str(v).lower() in ("off", "disabled", "false", "0", "(无)"):
+            continue
+        lbl = _ACCEL_OPT_LABEL.get(k, k)
+        if lbl not in dropped:
+            dropped.append(lbl)
+        o.pop(k, None)
+    o["_accel_gate"] = kinds
+    note = "已检测到外部加速节点（%s）→ 本节点内置加速已自动失效" % cn
+    if dropped:
+        note += "（原本启用：" + "、".join(dropped) + "）"
+    else:
+        note += "（内置加速原本就是关闭状态）"
+    return o, note
 
 
 def _glob_h3_outputs(pattern):
@@ -179,6 +315,9 @@ def _base_loaders(g, seq, nodes, opts):
     直接作为 director 的 model 输入。
     """
     o = dict(opts or {})
+    # 兜底：外接加速节点时内置加速必须失效（调用方已经做过一次，这里再兜一道，
+    # 保证"送进队列的图"永远不会出现双重加速）
+    o, _accel_gate_note = apply_external_accel_gate(o)
     u = str(seq[0]); seq[0] += 1
     c = str(seq[0]); seq[0] += 1
     vv = str(seq[0]); seq[0] += 1

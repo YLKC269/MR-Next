@@ -2501,6 +2501,10 @@ async def h3_shot(req):
     # 根因是主仓 bug（修复 commit bdcb886，只在 nightly）。护栏开启时自动把步数抬到安全线，
     # 并把回执带给前端提示 —— 用户要么升 nightly，要么接受 8 步以上。
     opts_out, audio_note = h3pmod.apply_audio_guard(opts_in)
+    # —— 外部（第三方）加速节点接口 ——
+    # 用户在画布上外接了加速节点（SageAttention / TeaCache / torch.compile / Nunchaku…）时，
+    # 前端扫描后会把检测到的类型放进 opts.external_accel → 这里让内置加速整体失效。
+    opts_out, accel_note = h3mod.apply_external_accel_gate(opts_out)
 
     base = _input_base()
     out_dir = _safe_join(base, (folder + "/video") if folder else "video")
@@ -2570,9 +2574,29 @@ async def h3_shot(req):
                   "filename": os.path.basename(path),
                   "dropped": dropped,
                   "audio_note": audio_note,
+                  "accel_note": accel_note,
                   "dialogues": [{"speaker": d.get("speaker") or "", "text": d.get("text") or ""}
                                 for d in (_dialogs or [])],
                   "prompt_final": prompt[:2000]})
+
+
+async def h3_external_nodes(req):
+    """POST /mrnext/h3/external_nodes —— 扫描工作流图里的外部模型节点 / 第三方加速节点。
+
+    body: {graph: <app.graph.serialize() 或工作流 JSON>}
+    返回 {ok, models:[{id,type,role,value}], accels:[{id,type,kind}], kinds, flat, note}
+      · models 用于一键「采用」外部加载器已经选好的模型文件（模型节点接口）
+      · kinds 非空 → 前端自动关掉内置加速（第三方加速节点接口），出片时再回执确认
+    """
+    body = await req.json()
+    graph = body.get("graph")
+    if not isinstance(graph, dict):
+        return _json({"error": "缺少 graph（请传工作流 JSON）"}, status=400)
+    try:
+        info = h3mod.scan_external_nodes(graph)
+    except Exception as exc:  # noqa: BLE001
+        return _json({"error": f"扫描失败: {exc}"}, status=500)
+    return _json({"ok": True, **info})
 
 
 async def h3_prompt_preview(req):
@@ -3449,6 +3473,7 @@ ROUTES = [
     ("POST", "/mrnext/editor/delete_materials", editor_delete_materials),
     ("POST", "/mrnext/h3/shot", h3_shot),
     ("POST", "/mrnext/h3/prompt_preview", h3_prompt_preview),
+    ("POST", "/mrnext/h3/external_nodes", h3_external_nodes),
     ("POST", "/mrnext/h3/dry", h3_dry),
     ("POST", "/mrnext/h3/free_vram", h3_free_vram),
     ("POST", "/mrnext/h3/upscale_video", h3_upscale_video),
