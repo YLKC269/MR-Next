@@ -145,25 +145,27 @@ export function createMentionEditor(ctx, { initial = "", favorites = [], assets 
     return `<span class="mtok mtok-${esc(kind)}" data-name="${esc(name)}" title="${esc(name)}">${img}<span class="mtxt">${esc(shown)}</span></span>`;
   }
   // 显式引用标记 <Picture N> / <Audio N> / <Video N> / <Subject N> → 突出引用 token。
-  // 实时解析成素材库第 N 张：显示素材缩略图 + 文件名（方便一眼找到）；找不到则抽象 glyph + 图N。
-  // <Subject N> 优先按手动绑定（tagBindings["<Subject N>"]）解析，再回退到 fileByIndex。
+  // 解析优先级：
+  //   ① 手动绑定 tagBindings["<Audio N>"]（用户在宫格里明确选了哪个文件）—— **所有 tag 都认**，
+  //      不能只认 Subject，否则「点了宫格选了 A，chip 还显示素材库第 N 个 B」（用户实报不会变）。
+  //   ② 素材库第 N 个（fileByIndex）：官方参考槽按编号，这是默认语义。
+  //   ③ 都没有 → 抽象 glyph + 「音N」。
   function tagTokenHTML(tag, n) {
     const t = normTag(tag); // 规范化（<video 1> → Video，<subject 1> → Subject）
     const kind = TAG_TO_KIND[t] || "image";
     const glyph = TAG_GLYPH[t] || KIND_GLYPH[kind] || "▣";
     const label = KIND_LABEL[kind];
-    let f = assetRegistry.fileByIndex(kind, n);
-    // <Subject N> 额外支持：手动绑定（relOfTag）→ 收藏库按名查找
-    if (!f && t === "Subject") {
-      const rel = assetRegistry.relOfTag(`<Subject ${n}>`);
-      if (rel) {
-        const fromFav = assetRegistry.favs.find((x) => x.rel === rel);
-        const fromFile = assetRegistry.files.find((x) => x.rel === rel);
-        if (fromFav) f = { kind: "image", index: 0, rel, fileName: fromFav.name, name: fromFav.name };
-        else if (fromFile) f = { kind: "image", index: 0, rel, fileName: fromFile.name, name: fromFile.name };
-        else f = { kind: "image", index: 0, rel, fileName: rel.split("/").pop() };
-      }
+    let f = null;
+    // ① 手动绑定优先（宫格里选过就按绑定显示）
+    const boundRel = assetRegistry.relOfTag(`<${t} ${n}>`);
+    if (boundRel) {
+      const fromFav = assetRegistry.favs.find((x) => x.rel === boundRel);
+      const fromFile = assetRegistry.files.find((x) => x.rel === boundRel);
+      const nm = (fromFav && fromFav.name) || (fromFile && fromFile.name) || boundRel.split("/").pop();
+      f = { kind, index: n, rel: boundRel, fileName: nm, name: nm };
     }
+    // ② 回退：素材库第 N 个
+    if (!f) f = assetRegistry.fileByIndex(kind, n);
     if (f && f.rel) {
       // image 显示缩略图；audio/video 显示图标（避免 img 加载非图片文件 broken）
       const showImg = kind === "image";
@@ -174,8 +176,14 @@ export function createMentionEditor(ctx, { initial = "", favorites = [], assets 
     return `<span class="mtok mtok-${kind}" data-tag="${t}" data-n="${n}"><span class="mtglyph">${glyph}</span><span class="mtxt">${label}${n}</span></span>`;
   }
 
-  function render() {
-    if (document.activeElement === box) {
+  // force=true：**程序化**改文本后强制重渲染。
+  // 为什么需要它：点 chip 时 box 会拿到焦点 → activeElement === box →
+  // 下面的「编辑中不重渲染」守卫会把 render() 直接 return 掉，
+  // 于是 replaceFirstTag/box.set 改了 lastPlain、toast 也报了成功，
+  // 但 DOM 里的 chip 还是旧素材名（用户实报「点击标记替换配音标记不会变」）。
+  // 守卫的本意只是「别打断用户正在打字」，不该拦「我们自己刚改完、必须刷新」的场景。
+  function render(force) {
+    if (!force && document.activeElement === box) {
       // 正在编辑时保留输入，不重渲染
       return;
     }
@@ -218,7 +226,7 @@ export function createMentionEditor(ctx, { initial = "", favorites = [], assets 
   // set() 也触发 commit：程序化写入 = 完整更新（含 store 回写）。
   // 此前只改 DOM 不 commit → store.script 仍为旧值 → 任何 store.set 触发
   // script.js 的 subscribe → ta.set(st.script) 把刚粘贴的剧本清空（n0=0 血案）。
-  box.set = (t) => { lastPlain = t || ""; box.innerText = lastPlain; render(); commit(); };
+  box.set = (t) => { lastPlain = t || ""; box.innerText = lastPlain; render(true); commit(); };
 
   // blur 必须 commit lastPlain（防止用户在框里改完没触发任何 store 监听）
   box.addEventListener("blur", commit);
@@ -381,7 +389,7 @@ export function createMentionEditor(ctx, { initial = "", favorites = [], assets 
         if (authoritative) assetRegistry.setRef(name, f.rel); // 公共前缀权威：写入全局绑定 → 全面板同步
         if (typeof onChoose === "function") onChoose(name, f.rel);
         ctx.toast(`已把「${name}」引用切到 ${f.name}`);
-        box.rerender();
+        box.rerender(true);   // 程序化切换：box 有焦点也要刷新 chip 显示
         menu.remove();
       } },
         u ? h("img", { src: u, alt: f.name, loading: "lazy" }) : h("span", { class: "mm-ph mm-ph-" + (f.kind || "image") }, KIND_GLYPH[f.kind] || "▣"),
@@ -412,7 +420,7 @@ export function createMentionEditor(ctx, { initial = "", favorites = [], assets 
     if (!re.test(text)) return false;
     lastPlain = text.replace(re, `<${newTag} ${newN}>`);
     box.innerText = lastPlain;
-    render();
+    render(true);   // 程序化替换：即使 box 有焦点也必须重渲染（否则 chip 不变）
     commit();
     return true;
   }
@@ -485,7 +493,7 @@ export function createMentionEditor(ctx, { initial = "", favorites = [], assets 
                   replaceFirstTag(tag, currentN, cardTag, currentN);
                 }
                 ctx.toast(`已绑定 ${tagKey} → ${a.name}`);
-                box.rerender && box.rerender();
+                box.rerender && box.rerender(true);   // 程序化绑定：box 有焦点也要刷新 chip 显示
               } else if (replaceFirstTag(tag, currentN, cardTag, a.index)) {
                 ctx.toast(`已替换为 <${cardTag} ${a.index}>（${a.name}）`);
               }

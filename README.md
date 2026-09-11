@@ -1,11 +1,46 @@
 # MR分镜助手导演台 · Next — 安装流程与使用教程
 
-> 版本：**v1.11.7** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
+> 版本：**v1.11.8** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
 >
 > 官方 MiniMax H3 出片引擎已内嵌在包内，**不需要另外安装任何节点**（VOSR2 / SeedVR2 是可选增强，装了才启用）。
 
 <details open>
-<summary><b>本次更新 · v1.11.7（点开看变化）</b></summary>
+<summary><b>本次更新 · v1.11.8（点开看变化）</b></summary>
+
+**① 修掉「点击标记替换配音标记不会变」**
+
+在分镜正文里点 `<Audio 2>` chip → 宫格弹层里选一个新音频，chip 上显示的素材名却纹丝不动。
+根因是**两条点 chip 的代码路径 + chip 显示解析函数三者没对齐**：
+
+- 提示词 / 公共前缀框是**权威面板**（`authoritative:true`）→ 点宫格只走 `assetRegistry.setTagBinding("<Audio 2>", rel)`，
+  **只写绑定、不改正文文本**（这是对的，权威面板不该被改写）；
+- 分镜 / 时间线面板 → 走 `replaceFirstTag`，改写正文 `<Audio 2>` → `<Audio 3>`；
+- 而 chip 显示的 `tagTokenHTML()` 老实现**只对 `<Subject N>` 认绑定**，其余 tag 一律回退到
+  `fileByIndex(kind, n)` = 素材库第 N 个 → 于是权威路径下你选了 A，chip 永远显示素材库第 N 个 B。
+
+修法：`tagTokenHTML()` 改为**绑定优先、素材库回退**（① tagBindings 手动绑定 → ② `fileByIndex` 第 N 个 → ③ 抽象 glyph）。
+另外给 `render(force)` 加形参：程序化改完文本后强制重渲染，绕开「编辑中不重渲染」守卫
+（该守卫本意只是别打断用户打字，不该拦"我们自己刚改完必须刷新"）。
+
+**② 补上真正的回归测试（Node + playwright-core，真鼠标点击）**
+
+之前这类 bug 测不出来，因为合成 `MouseEvent` 不产生真实焦点，`document.activeElement` 判据失真 →
+**bug 版也能全绿（假阳性）**。新测试基座 `web/js/_e2e_mention_harness.html` 单独一页（避开主页 overlay 抢点击），
+提供三个 boot 变体：**裸编辑器 / 分镜面板拓扑 / 权威前缀面板**，三个 e2e 用真实 Chrome 真点真断言：
+
+- `mention_replace_e2e.cjs` **16 项**（裸编辑器 + 真实鼠标）
+- `mention_panel_e2e.cjs` **14 项**（复刻 shots.js 的 wrap + 「焦点在面板内跳过重建」订阅）
+- `mention_authbind_e2e.cjs` **11 项**（权威路径：断言绑定写入、正文未被改写、**chip 素材名确实变了**）
+
+已接入 `.mmx_tests/run_all.sh` 新增的「Node / playwright-core」段，跑一次即可回归。
+本轮全量：**12/12 PASS**（8 离线 + `asset_match` 30 项 + 3 个 Node e2e 41 项），14 项因本机无 Python playwright 跳过。
+
+**仍未接入（如实列出）**：`v2v / rv2v / mixed` 三种 task_type、`sigmas` 外接噪声表。
+
+</details>
+
+<details>
+<summary><b>v1.11.7（点开看变化）</b></summary>
 
 **① 新增「🎯 匹配素材并引用」——参考旧包算法，把引用标记真的写进正文**
 

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>MR e2e mention harness</title>
+<!--
+  ⚠ 这是**测试基座**，不是产品页面：给 .mmx_tests/mention_*_e2e.cjs 用。
+  为什么必须单独一页（而不是把编辑器塞进 ComfyUI 主页）：主页有 overlay 抢点击，
+  真实鼠标点不到 chip（elementFromPoint 命中 dark-theme 遮罩）→ 合成事件又会假阳性。
+  本页无竞争层，三个 boot 变体分别复刻：裸编辑器 / 分镜面板拓扑 / 权威前缀面板。
+  改 mentions.js 后跑 .mmx_tests/run_all.sh 的「Node / playwright-core」段即可回归。
+-->
+<style>
+<style>
+  html, body { margin: 0; padding: 0; background: #0f1524; color: #e8eefc;
+    font: 13px/1.7 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  #host { padding: 24px; max-width: 900px; }
+  .mention-ed { min-height: 120px; border: 1px solid #2a3a55; border-radius: 8px;
+    padding: 10px; background: #12192b; white-space: pre-wrap; outline: none; }
+</style>
+</head>
+<body>
+<div id="host"></div>
+<script>
+// /scripts/api.js 是 shim：它读 window.comfyAPI.api.api，而那要 ComfyUI 启动后才存在。
+// 独立 harness 页没有 ComfyUI 启动流程 → 先塞一个最小 fetch 客户端顶上。
+// 只需要 fetchApi / apiURL / addEventListener 这几个被用到的方法。
+window.comfyAPI = window.comfyAPI || {};
+window.comfyAPI.api = window.comfyAPI.api || {};
+window.comfyAPI.api.api = {
+  fetchApi: (url, opts) => fetch(url, opts),
+  apiURL: (url) => url,
+  addEventListener: () => {},
+  removeEventListener: () => {},
+};
+window.comfyAPI.api.ComfyApi = class {};
+window.comfyAPI.api.UnauthorizedError = class extends Error {};
+window.comfyAPI.api.PromptExecutionError = class extends Error {};
+</script>
+<script type="module">
+import { createMentionEditor } from "/extensions/ComfyUI_MRBoard_Next/core/mentions.js";
+import { assetRegistry } from "/extensions/ComfyUI_MRBoard_Next/core/assets.js";
+
+window.__ready = false;
+window.__ev = [];
+window.__err = [];
+
+const t = () => performance.now().toFixed(0);
+
+window.__boot = async (folder, initial) => {
+  try {
+    await assetRegistry.refresh(folder);
+    const ctx = { toast: (m) => window.__ev.push(`${t()} TOAST ${m}`) };
+    const box = createMentionEditor(ctx, {
+      initial, favorites: [], assets: [], chosen: {},
+      onCommit: (txt) => window.__ev.push(`${t()} COMMIT`),
+      getAssets: () => assetRegistry.files || [],
+      authoritative: false,
+    });
+    document.getElementById("host").appendChild(box);
+    window.__box = box;
+    window.__ready = true;
+    return { audioCount: (assetRegistry.files || []).filter((f) => f.kind === "audio").length };
+  } catch (e) {
+    window.__err.push(String(e && e.stack || e));
+    throw e;
+  }
+};
+
+/**
+ * 复刻 shots.js 的真实拓扑来验证修复必要性：
+ *   面板外层 wrap 里放编辑器，**store 订阅在「焦点在 wrap 内」时跳过重建**
+ *   （shots.js:474 的原话注释：「用户正在编辑时不重排（保焦点）」）。
+ * 于是点 chip（焦点进入 wrap）后，唯一能刷新 chip 显示的路径就是
+ * createMentionEditor 内部那次 render()。若它被「编辑中不重渲染」守卫拦掉，
+ * 用户就看到「toast 说换了、chip 没变」。
+ *
+ * 这个 boot 变体把 wrap + 订阅守卫都建出来，让 e2e 能真正覆盖该拓扑。
+ */
+window.__bootPanel = async (folder, initial) => {
+  try {
+    await assetRegistry.refresh(folder);
+    const wrap = document.createElement("div");
+    wrap.id = "panelwrap";
+    document.getElementById("host").appendChild(wrap);
+
+    let shots = [initial];
+    // 模拟 store：订阅者在「焦点在 wrap 内」时重建（shots.js 同款守卫）
+    const subs = [];
+    const set = (next) => { shots[0] = next; subs.forEach((fn) => fn()); };
+
+    const ctx = { toast: (m) => window.__ev.push(`${t()} TOAST ${m}`) };
+    const box = createMentionEditor(ctx, {
+      initial: shots[0], favorites: [], assets: [], chosen: {},
+      onCommit: (txt) => { window.__ev.push(`${t()} COMMIT`); set(txt); },
+      getAssets: () => assetRegistry.files || [],
+      authoritative: false,
+    });
+    wrap.appendChild(box);
+
+    const render = () => {
+      // 真实 render 会 clear+重建 editor；这里只记录是否被触发
+      window.__ev.push(`${t()} PANEL_RENDER`);
+    };
+    subs.push(() => {
+      if (wrap.contains(document.activeElement)) { window.__ev.push(`${t()} SUB_SKIP(editing)`); return; }
+      render();
+    });
+
+    window.__box = box;
+    window.__wrap = wrap;
+    window.__ready = true;
+    return { audioCount: (assetRegistry.files || []).filter((f) => f.kind === "audio").length };
+  } catch (e) {
+    window.__err.push(String(e && e.stack || e));
+    throw e;
+  }
+};
+
+/**
+ * 权威面板变体（复刻 script.js 的公共前缀框）：authoritative = true。
+ * 点宫格卡片 → setTagBinding（只写绑定、不改正文）。chip 显示必须跟着绑定走。
+ */
+window.__bootAuth = async (folder, initial) => {
+  try {
+    await assetRegistry.refresh(folder);
+    window.__assetRegistry = assetRegistry;
+    const ctx = { toast: (m) => window.__ev.push(`${t()} TOAST ${m}`) };
+    const box = createMentionEditor(ctx, {
+      initial, favorites: [], assets: [], chosen: {},
+      onCommit: (txt) => window.__ev.push(`${t()} COMMIT`),
+      getAssets: () => assetRegistry.files || [],
+      authoritative: true,
+    });
+    document.getElementById("host").appendChild(box);
+    window.__box = box;
+    window.__ready = true;
+    return { audioCount: (assetRegistry.files || []).filter((f) => f.kind === "audio").length };
+  } catch (e) {
+    window.__err.push(String(e && e.stack || e));
+    throw e;
+  }
+};
+
+window.addEventListener("error", (e) => window.__err.push(String(e.message)));
+window.addEventListener("unhandledrejection", (e) => window.__err.push(String(e.reason)));
+</script>
+</body>
+</html>
