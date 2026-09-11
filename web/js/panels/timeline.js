@@ -890,9 +890,15 @@ export function createTimelinePanel(ctx) {
     } catch (_) { /* 解析失败不影响渲染 */ }
     return 0;
   };
-  // 只渲染「已填格 + 1 个添加位」——以前固定铺满 9/3 格，多出来的空格是**死格子**
-  // （点击只挂在"下一个空位"上，其余格子既没图标也没响应），用户实报「有些格子没用」。
-  const cellCount = (arr, cap) => Math.min(cap, (arr || []).filter(Boolean).length + 1);
+  // 槽位数固定铺满：图片 9 / 视频 3 / 音频 3（与官方参考上限一致，用户明确要看到全部槽位）。
+  // ⚠ 早期实现的坑：空格子的点击只挂在"下一个空位"上（if (k === arr.length)），
+  //   其余格子既没图标也没响应 = **死格**（用户实报「有些格子没用」）。
+  //   现在每一格都可点、都有 ＋，点任意空格都是"再添一个参考"（新加的排在最后）。
+  // 为什么不是"点第 7 格就放第 7 号"：官方 presentation 对空槽不占号
+  //   （MiniMaxH3ReferenceToVideo 里 for img in ref_images.values() 走插入顺序），
+  //   后端会把跳号槽位压成连续序并把标记同步重编号 —— 所以"填哪个格"最终都等价于"排第几"，
+  //   按顺序追加才是诚实的做法（见 h3shot.py _compact()/_renumber()）。
+  const cellCount = (arr, cap) => cap;
   const markLabel = (kind, n) => (kind === "video" ? "Video" : kind === "audio" ? "Audio" : "Picture");
 
   const imageGrid = (c, refreshEditor) => {
@@ -949,7 +955,9 @@ export function createTimelinePanel(ctx) {
             document.body.appendChild(swap); swap.click(); swap.remove();
           };
         } else {
-          cell.appendChild(h("span", { class: "mm-plus" }, "＋"));
+          const isNext = k === used;   // 下一格是"直接加"，后面几格是同样的动作（淡一点，但不失活）
+          cell.classList.add("mm-empty");
+          cell.appendChild(h("span", { class: "mm-plus" + (isNext ? "" : " dim") }, "＋"));
           cell.onclick = () => file.click();
         }
         grid.appendChild(cell);
@@ -1141,7 +1149,9 @@ export function createTimelinePanel(ctx) {
           };
           cell.appendChild(h("span", { class: "mm-x", title: "移除", onclick: (ev) => { ev.stopPropagation(); arr.splice(k, 1); paint(); refreshEditor(); } }, "✕"));
         } else {
-          cell.appendChild(h("span", { class: "mm-plus" }, "＋"));
+          const isNext = k === used;
+          cell.classList.add("mm-empty");
+          cell.appendChild(h("span", { class: "mm-plus" + (isNext ? "" : " dim") }, "＋"));
           cell.onclick = () => up.click();
         }
         grid.appendChild(cell);
@@ -1561,6 +1571,24 @@ export function createTimelinePanel(ctx) {
           if (_vmiss.length) {
             println(`⚠ <Video ${_vmiss.join("> <Video ")}> 找不到对应视频（本镜视频槽只有 ${_vv.length} 条）→ 请在「视频」格里上传，或点该格从素材库选`, "#ffb35c");
           }
+        }
+      }
+      // 参考生效回执：填了格子但正文里没标编号的 → 会作为「额外参考」一起送模型（不是没用）。
+      // 用户问「格子里的东西到底有没有生效」时，这一行就是答案。
+      if (P.mode === "r2v") {
+        const _bn2 = (refsFromText(c.prompt || text).byNum) || {};
+        const _extra = [];
+        for (const kv of [["image", "图"], ["video", "视频"], ["audio", "音频"]]) {
+          const kind = kv[0], cn = kv[1];
+          const arr = ((c.media && c.media[kind]) || []).filter(Boolean);
+          const marked = new Set(Object.keys(_bn2[kind] || {}).map((k) => _bn2[kind][k]));
+          const n = arr.filter((rel) => !marked.has(rel)).length;
+          if (n) _extra.push(n + " 个" + cn);
+        }
+        if (_extra.length) {
+          const _msg = "ℹ 有 " + _extra.join(" / ") + "没在正文里标编号 —— 已作为额外参考一起送进导演台"
+            + "（想精确控制就写 <Picture N>/<Video N>/<Audio N>）";
+          println(_msg, "#9fb6d0");
         }
       }
     } catch (_) { /* 回执失败不影响出片 */ }

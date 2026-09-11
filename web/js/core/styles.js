@@ -515,6 +515,11 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 .mm-cell .th { position: absolute; inset: 0; }
 .mm-cell .th img, .mm-cell .th video { width: 100%; height: 100%; object-fit: cover; display: block; background: #05070c; }
 .mm-cell .mm-plus { color: #4a5b76; font-size: clamp(14px, 1.5cqw, 22px); line-height: 1; user-select: none; }
+/* 空格：全部可点。紧邻的下一格是「直接加」（亮），后面的格子淡一点但同样能点 ——
+   悬停时点亮，免得看起来像死格（用户实报：有些格子没用）*/
+.mm-cell.mm-empty .mm-plus.dim { opacity: .38; }
+.mm-cell.mm-empty:hover .mm-plus.dim { opacity: .95; color: #9fb0c6; }
+.mm-cell.mm-empty:hover { border-color: rgba(120,170,255,.55); background: rgba(16,28,52,.85); }
 .mm-cell .mm-x { position: absolute; top: 0; right: 0; z-index: 4; width: clamp(14px, 1.5cqw, 22px); height: clamp(14px, 1.5cqw, 22px); border-radius: 0 0 0 6px;
   background: rgba(0, 0, 0, 0.72); color: #ff7b7b; font-size: 9px; line-height: 14px; text-align: center; cursor: pointer; }
 .mm-cell .mm-x:hover { background: #7a1f1f; color: #fff; }
