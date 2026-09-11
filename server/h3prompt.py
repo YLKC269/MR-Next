@@ -109,12 +109,17 @@ NON_SPEAKER_WORDS = (
 def extract_role_names(prefix):
     """从公共前缀里抽出角色名（按出现顺序）。用于给 (S1)/(S2) 编号，保证跨镜头一致。
 
-    支持三种写法：
+    支持四种写法：
         角色 1 - 林晚：…
         角色 2 - 顾言之
         <Subject 1> 林晚：…
+        <Picture 1> 是林晚（S1）的角色参考图：…   ← 古风模板单行格式（场景参考图不算角色）
     """
     names, seen = [], set()
+    for nm in prefix_role_names(prefix):     # 先抽单行格式（只认「角色参考图」）
+        if nm not in seen:
+            seen.add(nm)
+            names.append(nm)
     for line in str(prefix or "").splitlines():
         line = line.strip()
         if not line:
@@ -153,27 +158,40 @@ def _is_dialogue(sp, verb, dl, role_set):
     return False
 
 
-def split_dialogue(text, role_names=None):
-    """把镜头文本拆成 (画面描述, 对白列表[{speaker, text}])。
+def split_dialogue(text, role_names=None, tag_roles=None, tag_sids=None):
+    """把镜头文本拆成 (画面描述, 对白列表[{speaker, text, audio}])。
 
     对白行整行从画面描述里移除；行内剩余的引号内容也会被剔除（避免重复念）。
     """
     role_set = set(role_names or [])
+    tag_roles = dict(tag_roles or {})
+    tag_sids = dict(tag_sids or {})
     visual_lines, dialogs = [], []
     for raw in str(text or "").splitlines():
         line = raw.strip()
         if not line:
             continue
+        # 优先：行内「音色参考 <Audio N>：台词」（没写 <d> 的用户写法；一行可有多句）
+        vline, vdlgs = split_inline_voice_line(line, tag_roles, tag_sids)
+        if vdlgs:
+            dialogs.extend(vdlgs)
+            line = vline.strip()
+            if not line:
+                continue
         m = RE_DIALOG_LINE.match(line)
         if m and _is_dialogue(m.group("sp"), m.group("verb"), m.group("dl"), role_set):
             sp = (m.group("sp") or "").strip()
             dl = (m.group("dl") or "").strip()
+            # 音色参考「… 音色参考 <Audio 1>：台词」→ 绑到这条台词（标记不能留在画面里当空壳）
+            head2, an = split_voice_ref(line[:m.start("dl")])
+            if an:
+                line = (head2 + " " + (m.group("dl") or "")).strip()
             q = RE_QUOTED_BLOCK.search(dl)
             if q:
                 dl = q.group(1).strip()
             dl = dl.strip(" 「」『』“”\"'")
             if dl:
-                dialogs.append({"speaker": sp or "", "text": dl})
+                dialogs.append({"speaker": sp or "", "text": dl, "audio": an})
                 continue
         visual_lines.append(line)
     visual = "\n".join(visual_lines).strip()
@@ -181,9 +199,14 @@ def split_dialogue(text, role_names=None):
     for q in RE_QUOTED_BLOCK.finditer(visual):
         t = (q.group(1) or "").strip()
         if 1 < len(t) <= 300:
-            dialogs.append({"speaker": "", "text": t})
+            # 引号前若紧贴音色参考标记，一并绑上
+            _head, an = split_voice_ref(visual[max(0, q.start() - 40):q.start()])
+            dialogs.append({"speaker": "", "text": t, "audio": an})
     if dialogs:
         visual = RE_QUOTED_BLOCK.sub("", visual)
+        # 已被搬进台词行的音色标记 → 画面里残留的空壳清掉
+        visual = re.sub(RE_VOICE_REF_TAIL, "", visual)
+        visual = strip_dangling_voice_label(visual)
         visual = re.sub(r"[ \t]{2,}", " ", visual)
         visual = re.sub(r"\n{3,}", "\n\n", visual).strip()
     return visual, dialogs
@@ -215,6 +238,13 @@ def assign_speakers(dialogs, role_names=None, explicit=None):
     for nm in (role_names or []):
         if nm and nm not in mapping:
             mapping[nm] = _free()
+    # 台词自带的 S 编号（模板/前缀里作者指定，或按 <Picture N> 前缀表推出来的）
+    for d in dialogs or []:
+        sp = (d.get("speaker") or "").strip()
+        sid = (d.get("sid") or "").strip()
+        if sp and sid and sp not in mapping:
+            mapping[sp] = sid
+            used.add(sid)
     for d in dialogs or []:
         sp = (d.get("speaker") or "").strip()
         if sp and sp not in mapping:
@@ -264,6 +294,213 @@ RE_MARK_LINE = re.compile(r"^\s*\**\s*[\[【]\s*(?:场景|镜头|分镜|时长|�
 # 独白提示（嘴巴零动作）—— 生产模板规则：内心独白不张嘴
 RE_INNER = re.compile(r"内心\s*独白|心里\s*想|心声|嘴巴\s*(?:紧闭|不动|零动作)|不\s*张嘴")
 
+# ---------------------------------------------------------------- 音色参考（voice reference）
+# 官方契约：独立参考音频按 <Audio j> 编号 → `ref_audios.ref_audio_{j-1}`
+# （vendor/lib/ref_audios.py：reference_audio_prompt_tag(i) = "<Audio i+1>"）。
+# 模板/用户写法是「…（音色参考）<Audio 1>：<d>台词</d>」。
+#
+# ⚠ 踩坑（用户实报「标记了音色参考却一直不被参考」）：
+#   旧实现把这句 `<Audio 1>` 留在**画面描述**里，把 `<d>台词</d>` 抽到独立的
+#   `(S1) says:` 行 → 组装后画面里剩下一句悬空的「音色参考 <Audio 1>：」，
+#   台词却在不带任何标记的另一行。参考音频与"它要给谁配音"的绑定被切断，
+#   模型自然不去用它。下面把 <Audio N> 搬进它配的那句台词行（官方 presentation
+#   顺序 images → videos → standalone audio 不变，只是把标记写在同一句里）。
+RE_VOICE_REF_TAIL = re.compile(
+    r"(?:音\s*色|配\s*音|声\s*音|语\s*音|说\s*话\s*声|voice|timbre|tone)\s*"
+    r"(?:参\s*考|参\s*照|来\s*源|取自|来自|用)?\s*[：:]?\s*"
+    r"<\s*Audio\s*(\d+)\s*>\s*[：:]?\s*$", re.IGNORECASE)
+RE_AUDIO_TAIL = re.compile(r"<\s*Audio\s*(\d+)\s*>\s*[：:]?\s*$", re.IGNORECASE)
+# 关键词锚定的音色标记（不要求标记在行尾）：`音色参考 <Audio 1>，嘴巴零动作：`
+RE_VOICE_KEY = re.compile(
+    r"(?:音\s*色|配\s*音|说\s*话\s*声|语\s*音|voice|timbre|tone)\s*"
+    r"(?:参\s*考|参\s*照|来\s*源|取自|来自|用)?\s*[：:]?\s*"
+    r"<\s*Audio\s*(\d+)\s*>", re.IGNORECASE)
+# 行内写法「音色参考 <Audio 1>：台词…」（没有 <d> 包裹时）；要求标记后紧跟分隔符，
+# 否则 `环境音参考 <Audio 3> 是风声` 这种会被误当台词
+RE_VOICE_REF_MID = re.compile(
+    r"(?:音\s*色|配\s*音|说\s*话\s*声|语\s*音|voice|timbre|tone)\s*"
+    r"(?:参\s*考|参\s*照|来\s*源|取自|来自|用)?\s*[：:]?\s*"
+    r"<\s*Audio\s*(\d+)\s*>\s*[：:，,、]\s*", re.IGNORECASE)
+# 台词终点：下一个说话人标记（<Picture/Subject/Video N>）
+RE_SPEAKER_TAG = re.compile(r"<\s*(Picture|Subject|Video)\s*\d+\s*>", re.IGNORECASE)
+
+
+def split_inline_voice_line(line, tag_roles=None, tag_sids=None):
+    """一行里可能有**多句**「…<Picture N> 动作，音色参考 <Audio N>：台词」→ 逐句切开。
+
+    返回 (画面文本, [对白项…])。说话人 = 该音色标记之前最近的 <Picture/Subject N>；
+    台词终点 = 下一个说话人标记（或行尾），中间的动作描述留给画面。
+    """
+    marks = list(RE_VOICE_REF_MID.finditer(str(line or "")))
+    if not marks:
+        return str(line or ""), []
+    tag_roles = dict(tag_roles or {})
+    tag_sids = dict(tag_sids or {})
+    visual_parts, dialogs = [], []
+    cursor = 0
+    for i, m in enumerate(marks):
+        head = line[cursor:m.start()]
+        refs = [r for r in RE_ANY_TAG.finditer(head)
+                if (r.group(1) or "").lower() != "audio"]
+        key = _tag_key(refs[-1].group(0)) if refs else ""
+        end_limit = marks[i + 1].start() if i + 1 < len(marks) else len(line)
+        nt = RE_SPEAKER_TAG.search(line, m.end(), end_limit)
+        end = nt.start() if nt else end_limit
+        visual_parts.append(head)
+        dl = line[m.end():end].strip().strip(" 「」『』“”\"'")
+        dl = re.sub(r"^\s*[\[【]\s*(?:[A-Za-z]+|中文|Chinese|English)\s*[\]】]\s*", "", dl).strip()
+        if dl:
+            dialogs.append({"speaker": tag_roles.get(key, ""), "text": dl,
+                            "audio": int(m.group(1)), "sid": tag_sids.get(key, "")})
+        cursor = end
+    visual_parts.append(line[cursor:])
+    return "".join(visual_parts), dialogs
+# 悬空的音色标签（标记已被搬进台词行 → 画面里只剩「音色参考：」这种空壳，必须清掉）
+RE_VOICE_LABEL = re.compile(
+    r"(?:音\s*色|配\s*音|声\s*音|语\s*音)\s*(?:参\s*考|参\s*照|来\s*源)?\s*[：:]", re.IGNORECASE)
+# 镜头行里「[2 人说话：S1、S3，均开口说话]」这类作者指定的说话人编号
+RE_SPEAKER_HINT = re.compile(r"[\[【][^\]】]{0,24}?(?:人\s*说话|说话人)[^\]】]{0,24}?[\]】]")
+
+# 前缀里的 `<Picture N>` / `<Subject N>` → 角色名（还有 S 编号）
+#   形式 A1：`<Picture 1> 是云妙衣（S1）的角色参考图：高盘发…`（古风模板单行格式）
+#   形式 A2：`<Picture 1> 云妙衣（S1）：高盘发…`
+#   形式 B ：`角色 1 - 云妙衣：<Picture 1> 高盘发…`
+# ⚠ 必须把「角色参考图」和「场景参考图」分开：`<Picture 4> 是公主府库房门口场景参考图：…`
+#    里的 <Picture 4> 是**场景**参考图，误当角色会让台词挂到"公主府库房门口"这个说话人上。
+RE_PREFIX_TAG_IS_ROLE = re.compile(
+    r"^\s*[-*•]?\s*<\s*(Picture|Subject)\s*(\d+)\s*>\s*(?:是|为|即)?\s*"
+    r"([^：:\n（(的]{1,20}?)\s*(?:[（(]\s*(S\s*\d+)\s*[）)])?\s*的?\s*"
+    r"(?:角色|人物)\s*(?:参考图|参考)?\s*[：:]")
+RE_PREFIX_TAG_FIRST = re.compile(
+    r"^\s*[-*•]?\s*<\s*(Picture|Subject)\s*(\d+)\s*>\s*([^：:\n（(的]{1,20}?)\s*"
+    r"(?:[（(]\s*(S\s*\d+)\s*[）)])?\s*[：:]")
+RE_PREFIX_ROLE_LINE = re.compile(
+    r"^\s*[-*•]?\s*(?:角色|人物|主角|配角)\s*\d*\s*[-－—–:：]?\s*([^：:\n]{1,20}?)\s*[：:]\s*(.+)$")
+RE_PREFIX_SID = re.compile(r"[（(]\s*(S\s*\d+)\s*[）)]")
+# 非角色的行首词（场景/道具/音效…里也会出现 <Picture N>，那是参考图不是说话人）
+NON_ROLE_HEADS = ("场景", "地点", "时间", "道具", "音效", "配乐", "音乐", "画面", "风格", "光线")
+
+
+def prefix_role_names(prefix):
+    """前缀里「<Picture N> 是 名字（Sx）的角色参考图：…」这种单行格式 → 角色名（按顺序）。"""
+    names = []
+    for raw in str(prefix or "").splitlines():
+        m = RE_PREFIX_TAG_IS_ROLE.match(raw.strip())
+        if not m:
+            continue
+        nm = (m.group(3) or "").strip(" ：:·-－—")
+        if nm and 1 < len(nm) <= 16 and nm not in names:
+            names.append(nm)
+    return names
+
+
+def prefix_tag_roles(prefix, names=None):
+    """从前缀里解析「<Picture N>/<Subject N> → 角色名（+ 作者指定 S 编号）」。
+
+    模板只在前缀声明角色（`角色 1 - 云妙衣：<Picture 1> …`），镜头正文里则写
+    `<Picture 1> …台词…`。没有这张映射表时，正文里 `<d>` 的说话人只能落到
+    "上一个说话人" → 多角色镜头全部归到 S1（音色全串到一个人身上）。
+    """
+    tag_roles, tag_sids = {}, {}
+    name_set = set(names or [])
+    for raw in str(prefix or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # 形式 A1：`<Picture 1> 是云妙衣（S1）的角色参考图：…`（明确写了"角色参考图"才算角色）
+        m = RE_PREFIX_TAG_IS_ROLE.match(line)
+        if m:
+            nm = (m.group(3) or "").strip(" ：:·-－—")
+            sid = re.sub(r"\s+", "", (m.group(4) or "")).upper()
+            if nm and 1 < len(nm) <= 16:
+                key = _tag_key("<%s %s>" % (m.group(1), m.group(2)))
+                if key:
+                    tag_roles[key] = nm
+                    if sid:
+                        tag_sids[key] = sid
+            continue
+        # 形式 A2：`<Picture 1> 云妙衣（S1）：…` —— 必须带作者指定 (Sx) 或名字在前缀角色表里，
+        # 否则会把 `<Picture 4> 是公主府库房门口…` 这种场景行当角色
+        m = RE_PREFIX_TAG_FIRST.match(line)
+        if m:
+            nm = (m.group(3) or "").strip(" ：:·-－—")
+            sid = re.sub(r"\s+", "", (m.group(4) or "")).upper()
+            if nm and 1 < len(nm) <= 16 and (sid or nm in name_set):
+                key = _tag_key("<%s %s>" % (m.group(1), m.group(2)))
+                if key:
+                    tag_roles[key] = nm
+                    if sid:
+                        tag_sids[key] = sid
+            continue
+        m = RE_PREFIX_ROLE_LINE.match(line)
+        if m:
+            nm = (m.group(1) or "").strip(" ：:·-－—")
+            nm = re.split(r"[（(]", nm)[0].strip()
+            if not nm or not (1 < len(nm) <= 16):
+                continue
+            if any(nm.startswith(h) for h in NON_ROLE_HEADS):
+                continue
+            rest = m.group(2) or ""
+            t = RE_ANY_TAG.search(rest)
+            if not t:
+                continue
+            key = _tag_key(t.group(0))
+            if key and key not in tag_roles:
+                tag_roles[key] = nm
+                sid = RE_PREFIX_SID.search(nm + rest)
+                if sid:
+                    tag_sids[key] = re.sub(r"\s+", "", sid.group(1)).upper()
+    return tag_roles, tag_sids
+
+
+def extract_speaker_hint(text):
+    """镜头行里的「[2 人说话：S1、S3，均开口说话]」→ ['S1','S3']（作者指定编号）。"""
+    m = RE_SPEAKER_HINT.search(str(text or ""))
+    if not m:
+        return []
+    return ["S" + d for d in re.findall(r"[Ss]\s*(\d+)", m.group(0))]
+
+
+def split_voice_ref(seg):
+    """切出 seg 里的「音色参考 <Audio N>」→ (清理后的 seg, N or 0)。
+
+    三种写法都要认（古风/短剧模板各不一样）：
+      ① `音色参考 <Audio 1>：` 紧贴台词（标记在 seg 末尾）
+      ② `音色参考 <Audio 1>，嘴巴零动作：`（关键词锚定，标记后面还有别的内容）
+      ③ `<Audio 1>：` 紧贴台词（用户省略「音色参考」四字）
+    判据必须**带音色关键词或紧贴台词**：`环境音参考 <Audio 3> 是风声…` 这种非配音用途
+    的音频参考绝不能被搬进台词（否则音色串到环境音上）。
+    """
+    s = str(seg or "")
+    m = RE_VOICE_REF_TAIL.search(s)
+    if m:
+        return s[:m.start()].rstrip(), int(m.group(1))
+    m = RE_VOICE_KEY.search(s)
+    if m:
+        # 只摘掉标记与它前面的关键词标签，后面的画面/状态描述保留
+        out = (s[:m.start()] + s[m.end():])
+        out = re.sub(r"[，,、]\s*[，,、]", "，", out)
+        out = re.sub(r"[ \t]{2,}", " ", out)
+        return out.rstrip(" ，,、：:"), int(m.group(1))
+    m = RE_AUDIO_TAIL.search(s)
+    if m:
+        return s[:m.start()].rstrip(), int(m.group(1))
+    return s, 0
+
+
+def strip_dangling_voice_label(text):
+    """清掉已被搬走标记后剩下的空壳「音色参考：」（同一行里已无 <Audio 才清）。"""
+    out = []
+    for ln in str(text or "").splitlines():
+        if "<Audio" not in ln and "<audio" not in ln:
+            ln = RE_VOICE_LABEL.sub("", ln)
+            ln = re.sub(r"[，。；、]?\s*[，。；、]", "，", ln)
+            ln = re.sub(r"[ \t]{2,}", " ", ln).strip(" ，。；、")
+            if ln.endswith("：") or ln.endswith(":"):
+                ln = ln[:-1].rstrip()
+        out.append(ln)
+    return "\n".join(out)
+
 
 def _tag_key(tag):
     """<' Picture ' 1 '> → '<Picture 1>'（统一大小写与空格）。"""
@@ -283,13 +520,17 @@ def is_production_shot(text):
                 or RE_D_TAG.search(t))
 
 
-def parse_shot_blocks(text, role_names=None):
+def parse_shot_blocks(text, role_names=None, tag_roles=None, tag_sids=None):
     """把「生产模板」式镜头文本拆成结构化字段。不是该格式 → 返回 None（交回原逻辑）。
+
+    tag_roles / tag_sids：前缀里解析出的「<Picture N> → 角色名 / S 编号」（见
+    prefix_tag_roles）。模板只在前缀声明角色，正文用 `<Picture N>` 指代 → 没有这张
+    表时正文 `<d>` 的说话人只能沿用上一位，多角色镜头会全归到 S1（音色全串台）。
 
     返回 {
       cast:  {"<Picture 1>": {name, sid, desc}},
       visual: str,                    # 画面描述（角色外观 + 站位 + 动作；已把 <Picture N> 换成人名）
-      dialogue: [{speaker, sid, text, inner}],
+      dialogue: [{speaker, sid, text, inner, audio}],   # audio = <Audio N> 的 N（0=无）
       ambience: str,                  # 【本镜音效】整理成 overall_soundscape 文案
       music: str,                     # 音效块里的「配乐」
     }
@@ -297,6 +538,8 @@ def parse_shot_blocks(text, role_names=None):
     raw = str(text or "")
     if not is_production_shot(raw):
         return None
+    tag_roles = dict(tag_roles or {})
+    tag_sids = dict(tag_sids or {})
 
     cast, positions, sfx_items, music_items = {}, [], [], []
     section = None
@@ -355,38 +598,57 @@ def parse_shot_blocks(text, role_names=None):
         body_lines.append(ln2)
 
     # 台词：正文里的 <d>…</d>，说话人取"该 <d> 之前最近的 <Picture N>"对应的角色
+    # 音色：正文里紧贴台词的「音色参考 <Audio N>：」→ 绑到这一条台词上（见 RE_VOICE_REF_TAIL 注释）
     dialogue, visual_lines = [], []
     last_who = ""
+    hint_sids = extract_speaker_hint(raw)   # [2 人说话：S1、S3] → ['S1','S3']
+    hint_turn = 0
     for ln in body_lines:
         out, pos = [], 0
         for m in RE_D_TAG.finditer(ln):
             seg = ln[pos:m.start()]
-            out.append(seg)
+            who, audio_n = "", 0
             # 说话人判定：最近的 <Picture/Subject/Video N>（<Audio N> 只是音色参考，
             # 不能当说话人，否则台词会全部归到 S1）→ 其次段落里出现过的角色名 → 再其次沿用上一位
-            who = ""
             refers = list(RE_ANY_TAG.finditer(seg))
             pick = [r for r in refers if (r.group(1) or "").lower() != "audio"]
             if not pick:
                 pick = refers
             if pick:
                 who = _tag_key(pick[-1].group(0))
-            if not who or who not in cast:
+            # 正文里的 <Picture N> 前缀里有声明 → 补一条 cast（模板正文常用这类指代）
+            if who and who not in cast and tag_roles.get(who):
+                cast[who] = {"name": tag_roles[who], "sid": tag_sids.get(who, ""), "desc": ""}
+            if not who or not cast.get(who, {}).get("name"):
                 named = [v["name"] for v in cast.values()
                          if v.get("name") and v["name"] in seg]
+                if not named:
+                    for _k, _nm in tag_roles.items():
+                        if _nm and _nm in seg:
+                            named.append(_nm)
                 if named:
                     who = named[-1]
                     who = next((k for k, v in cast.items() if v["name"] == who), who)
-            if not who or who not in cast:
+                    if who not in cast:
+                        cast[who] = {"name": named[-1], "sid": "", "desc": ""}
+            if not who or not cast.get(who, {}).get("name"):
                 who = last_who
             last_who = who
+            # 音色参考：只认紧贴台词的写法
+            seg, audio_n = split_voice_ref(seg)
+            out.append(seg)
             entry = cast.get(who) or {}
             txt = (m.group(1) or "").strip()
             txt = txt.strip(" 「」『』“”\"'")
             txt = re.sub(r"^\s*[\[【]\s*(?:[A-Za-z]+|中文|Chinese|English)\s*[\]】]\s*", "", txt).strip()
             if txt:
-                dialogue.append({"speaker": entry.get("name", ""), "sid": entry.get("sid", ""),
-                                 "text": txt, "inner": bool(RE_INNER.search(seg))})
+                sid = (entry.get("sid") or "").strip() or tag_sids.get(who, "")
+                if not sid and hint_sids:
+                    sid = hint_sids[min(hint_turn, len(hint_sids) - 1)]
+                    hint_turn += 1
+                dialogue.append({"speaker": entry.get("name", ""), "sid": sid,
+                                 "text": txt, "inner": bool(RE_INNER.search(seg)),
+                                 "audio": audio_n})
             pos = m.end()
         out.append(ln[pos:])
         visual_lines.append("".join(out))
@@ -396,13 +658,26 @@ def parse_shot_blocks(text, role_names=None):
     if cast:
         bits = []
         for v in cast.values():
+            nm = (v.get("name") or "").strip()
+            if not nm:
+                continue
+            _sid = (v.get("sid") or "").strip()
             _d = (v.get("desc") or "").strip().rstrip("。.")
-            bits.append("%s（%s）%s" % (v["name"], v["sid"], _d) if _d
-                        else "%s（%s）" % (v["name"], v["sid"]))
-        parts.append("本镜角色：" + "；".join(bits))
+            if _sid and _d:
+                bits.append("%s（%s）%s" % (nm, _sid, _d))
+            elif _sid:
+                bits.append("%s（%s）" % (nm, _sid))
+            elif _d:
+                bits.append("%s：%s" % (nm, _d))
+            else:
+                bits.append(nm)
+        if bits:
+            parts.append("本镜角色：" + "；".join(bits))
     if positions:
         parts.append("本镜站位：" + "；".join(positions))
     body = "\n".join(x for x in visual_lines if x.strip()).strip()
+    # 音色标记已被搬进台词行 → 画面里只剩「音色参考：」空壳，清掉（否则模型看到悬空指令）
+    body = strip_dangling_voice_label(body)
     body = _clean_visual_text(body)
     if body:
         parts.append(body)
@@ -467,21 +742,31 @@ def build_av_prompt(*, visual="", dialogue=None, speaker_map=None,
     descs = [" ".join([head] + parts).strip()]
 
     speaker_map = speaker_map or {}
+    # 未知说话人的兜底顺序：按前缀角色顺序（S1、S2…）依次取，避免多角色镜头全归到 S1
+    fallback_sids = [v for _k, v in sorted(speaker_map.items(), key=lambda kv: str(kv[1]))]
+    fb = 0
     spoken = 0
     for d in dialogue:
         txt = (d.get("text") or "").strip()
         if not txt:
             continue
         sp = (d.get("speaker") or "").strip()
-        sid = speaker_map.get(sp, "S1")
+        sid = (d.get("sid") or "").strip() or speaker_map.get(sp, "")
+        if not sid:
+            sid = fallback_sids[min(fb, len(fallback_sids) - 1)] if fallback_sids else "S1"
+            fb += 1
         who = ("%s (%s)" % (sp, sid)) if sp else ("(%s)" % sid)
+        # 音色参考（官方 <Audio j> → ref_audios.ref_audio_{j-1}）：
+        # **必须写在这一句台词上**，否则参考音频不知道要给谁配音（用户实报「音色不被参考」）。
+        an = int(d.get("audio") or 0)
+        vref = (" (voice reference <Audio %d>)" % an) if an > 0 else ""
         # 台词必须用 [语言] … ；绝不能用双引号（会被当成画面字幕）
         if d.get("inner"):
             # 生产模板规则「内心独白时嘴巴紧闭零动作」：写成独白并显式声明不张嘴，
             # 否则 H3 会让人物开口说话（口型对不上，观众一眼看出假）
-            descs.append("%s %s: [%s] %s" % (who, INNER_MONOLOGUE_CN if l == CN else INNER_MONOLOGUE, lang, txt))
+            descs.append("%s%s %s: [%s] %s" % (who, vref, INNER_MONOLOGUE_CN if l == CN else INNER_MONOLOGUE, lang, txt))
         else:
-            descs.append("%s says: [%s] %s" % (who, lang, txt))
+            descs.append("%s says%s: [%s] %s" % (who, vref, lang, txt))
         spoken += 1
     # 关键：一句台词都没有时必须显式声明"不要人声"，否则 H3 会自己安排人说胡话。
     # 用跟脚本同语言的最短写法：中剧写「无台词，无人声」而非一整段英文。
@@ -561,7 +846,10 @@ def assemble(*, text="", prefix="", role_names=None, opts=None, shot_no=1, secon
         return ((prefix + "\n\n" + text).strip() if prefix else text), []
 
     names = list(role_names or extract_role_names(prefix))
-    blk = parse_shot_blocks(text, names)
+    # 前缀 → 「<Picture N> = 哪个角色 / 作者给的 S 编号」：模板正文只写 <Picture N>，
+    # 没有这张表就无法判断"这句台词是谁说的"（多角色镜头会全归 S1 → 音色全串一个人）
+    tag_roles, tag_sids = prefix_tag_roles(prefix, names)
+    blk = parse_shot_blocks(text, names, tag_roles, tag_sids)
     blk_amb, blk_mus = "", ""
     if blk:
         # 生产模板（本镜出场角色/站位/音效 + <d> 台词）：结构化拆分，
@@ -570,12 +858,17 @@ def assemble(*, text="", prefix="", role_names=None, opts=None, shot_no=1, secon
         dialogs = blk.get("dialogue") or []
         blk_amb, blk_mus = blk.get("ambience") or "", blk.get("music") or ""
         explicit = {}
+        # 前缀里作者指定的 S 编号（`角色 1 - 云妙衣（S1）：<Picture 1> …`）
+        for _tag, _sid in tag_sids.items():
+            _nm = tag_roles.get(_tag, "")
+            if _nm and _sid:
+                explicit.setdefault(_nm, _sid)
         for v in (blk.get("cast") or {}).values():
             if v.get("name") and v.get("sid"):
                 explicit[v["name"]] = v["sid"]
         smap = assign_speakers(dialogs, names, explicit)
     else:
-        visual, dialogs = split_dialogue(text, names)
+        visual, dialogs = split_dialogue(text, names, tag_roles, tag_sids)
         if not visual and not dialogs:
             visual = text
         smap = assign_speakers(dialogs, names)

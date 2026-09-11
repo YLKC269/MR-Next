@@ -668,10 +668,13 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
         li_last = None
 
     if mode == "r2v":
-        # ⚠ 官方参考槽是**按编号**对应的（vendor/lib/ref_images.py 的 tooltip 原文：
-        #   "Reference image for <Picture {index+1}>"）→ 第 N 号必须落在槽 N-1。
-        # 以前按"列表顺序"接：<Picture 1>/<Picture 3> 会接到槽 0/1，于是"第 3 张"永远没进图
-        # （用户实报：标记了图片/音频参考不作用）。这里改成按编号接。
+        # 官方参考槽（vendor/lib/ref_images.py tooltip 原文：ref_image_{k} ↔ <Picture {k+1}>）是
+        # **按"非空槽的先后顺序"编号**的 —— MiniMaxH3ReferenceToVideo.execute 里
+        # `for img in (ref_images or {}).values()` 走 dict 插入顺序，**空槽不占号**。
+        # 所以只填第 3 个槽时，官方把它当 <Picture 1>；提示词里的 <Picture 3> 就指向
+        # 不存在的参考 → 参考等于没用（用户实报「音色一直不被参考」就是这种"跳号"）。
+        # 对策：把有编号的参考**按编号升序压到连续槽位**，并把提示词里的标记**同步重编号**，
+        # 保证「提示词第 k 号 ↔ 第 k 个非空槽」这个官方不变量成立。
         def _sort_num(d):
             items = []
             for k, v in (d or {}).items():
@@ -681,39 +684,49 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
                     continue
             return sorted(items)
 
-        g_ins, used_img = {}, set()
-        for n, rel in _sort_num(ref_by_num):
-            if rel and 1 <= n <= 9 and rel not in used_img:
-                g_ins[f"ref_images.ref_image_{n - 1}"] = link(add("LoadImage", {"image": rel}))
-                used_img.add(rel)
-        # 没写编号的（按素材名自动带入的）→ 补到空槽位，不抢占已编号的位置
-        for rel in [r for r in (refs or []) if r and r not in used_img]:
-            k = 0
-            while f"ref_images.ref_image_{k}" in g_ins:
-                k += 1
-            if k > 8:
-                break
-            g_ins[f"ref_images.ref_image_{k}"] = link(add("LoadImage", {"image": rel}))
-            used_img.add(rel)
-        # 兜底：完全没有编号信息（旧前端缓存）→ 维持旧的顺序接法
-        if not g_ins:
-            for k, rel in enumerate([r for r in (refs or [])[:9] if r]):
-                g_ins[f"ref_images.ref_image_{k}"] = link(add("LoadImage", {"image": rel}))
+        def _compact(by_num, extra, cap):
+            """[(旧编号, rel)] + 无编号补充 → (连续排列的 rel 列表, {旧编号: 新编号})"""
+            pairs, used = [], set()
+            for n, rel in _sort_num(by_num):
+                if rel and 1 <= n <= cap and rel not in used:
+                    pairs.append((n, rel)); used.add(rel)
+            for rel in (extra or []):
+                if rel and rel not in used and len(pairs) < cap:
+                    pairs.append((0, rel)); used.add(rel)   # 0 = 正文里没标编号
+            rename = {}
+            for k, (n, _rel) in enumerate(pairs):
+                if n:
+                    rename[n] = k + 1
+            return [rel for _n, rel in pairs], rename
 
-        # 音色参考同理：<Audio N> → ref_audios.ref_audio_{N-1}（官方最多 3 条）
-        used_aud = set()
-        for n, rel in _sort_num(audio_by_num):
-            if rel and 1 <= n <= 3 and rel not in used_aud:
-                g_ins[f"ref_audios.ref_audio_{n - 1}"] = link(add("LoadAudio", {"audio": rel}))
-                used_aud.add(rel)
-        for rel in [a for a in (audios or []) if a and a not in used_aud]:
-            k = 0
-            while f"ref_audios.ref_audio_{k}" in g_ins:
-                k += 1
-            if k > 2:
-                break
+        def _renumber(text, tag, rename):
+            """把正文里的 <Picture/Audio N> 按 rename 重编号（两趟替换防 1↔2 互撞）。"""
+            if not rename or not text:
+                return text
+            pat = re.compile(r"<\s*%s\s*(\d+)\s*>" % tag, re.IGNORECASE)
+
+            def _ph(m):
+                n = int(m.group(1))
+                return "\x00%s%d\x00" % (tag, rename[n]) if n in rename else m.group(0)
+
+            out = pat.sub(_ph, text)
+            return re.sub(r"\x00(%s)(\d+)\x00" % tag, r"<\1 \2>", out)
+
+        img_rels, img_rename = _compact(ref_by_num, refs, 9)
+        aud_rels, aud_rename = _compact(audio_by_num, audios, 3)
+        if ref_by_num:
+            prompt = _renumber(prompt, "Picture", img_rename)
+        if audio_by_num:
+            prompt = _renumber(prompt, "Audio", aud_rename)
+        # Director 的 global_prompt 也用改号后的提示词（它是 fallback/公共段来源，
+        # 留着旧标记会在 common 模式下重新引入对不上的 <Picture N>/<Audio N>）
+        widget["global_prompt"] = prompt
+
+        g_ins = {}
+        for k, rel in enumerate(img_rels):
+            g_ins[f"ref_images.ref_image_{k}"] = link(add("LoadImage", {"image": rel}))
+        for k, rel in enumerate(aud_rels):
             g_ins[f"ref_audios.ref_audio_{k}"] = link(add("LoadAudio", {"audio": rel}))
-            used_aud.add(rel)
         g_ins["prompt"] = prompt
         g_ins["duration_sec"] = float(seconds)
         grp = add("MiniMaxH3DirectorGroupReferenceToVideo", g_ins)

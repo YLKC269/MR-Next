@@ -707,7 +707,12 @@ export function createTimelinePanel(ctx) {
           });
           if (!r.ok) { ctx.toast("预览失败: " + (r.error || ""), true); return; }
           const txt = r.prompt || "";
-          const dlg = (r.dialogues || []).map((d) => `${d.speaker || "?"}: ${d.text}`).join("\n");
+          // 回显里把「谁说的 + 第几号音色」也写出来：用户能一眼核对音色有没有绑对
+          const dlg = (r.dialogues || []).map((d) => {
+            const who = d.speaker ? `${d.speaker}${d.sid ? ` (${d.sid})` : ""}` : (d.sid ? `(${d.sid})` : "?");
+            const au = Number(d.audio) > 0 ? `（音色参考 <Audio ${d.audio}>）` : "";
+            return `${who}${au}${d.inner ? "［内心独白］" : ""}: ${d.text}`;
+          }).join("\n");
           showTextModal("H3 官方提示词预览", txt + (dlg ? "\n\n—— 识别到的对白 ——\n" + dlg : "\n\n（本镜没有识别到对白 → 已显式声明 No dialogue）"));
         } catch (e) { ctx.toast("预览失败: " + e.message, true); }
       } }, "🔍 预览本镜提示词");
@@ -1433,6 +1438,21 @@ export function createTimelinePanel(ctx) {
       const auds = ((c.media && c.media.audio) || []).filter(Boolean).slice(0, 3);
       if (auds.length) payload.audio = auds;
     }
+    // 音色参考回执：官方只在「参考生视频(R2V)」有 ref_audios.ref_audio_{N-1} 槽位。
+    // 别的模式标了 <Audio N> 也发不出去 → 必须明说，否则用户以为"标了就生效"（用户实报）。
+    try {
+      const _tags = [...new Set([...String(text).matchAll(/<\s*Audio\s*(\d+)\s*>/gi)]
+        .map((m) => parseInt(m[1], 10)).filter((n) => n > 0))].sort((a, b) => a - b);
+      if (_tags.length && P.mode !== "r2v") {
+        println(`⚠ 本镜标了 <Audio ${_tags.join("> <Audio ")}> 音色参考，但当前是「${modeLabel(P.mode)}」模式 —— 官方只有「参考生视频(R2V)」支持音色参考，切到 R2V 才会生效`, "#ffb35c");
+      } else if (_tags.length) {
+        const _au = ((c.media && c.media.audio) || []).filter(Boolean);
+        const _miss = _tags.filter((n) => !_au[n - 1]);
+        if (_miss.length) {
+          println(`⚠ <Audio ${_miss.join("> <Audio ")}> 找不到对应音频（本镜音频槽只有 ${_au.length} 条，最多 3 条）→ 这几条音色参考不会生效；请在正文里改用 @音频名 或点音频格第 ${_miss[0]} 格上传`, "#ffb35c");
+        }
+      }
+    } catch (_) { /* 回执失败不影响出片 */ }
     println(`▶ 第${sh.index}镜（${modeLabel(P.mode)} · ${sec}s · ${isFramesMode
       ? `首帧${(frames && frames[0]) ? "✓" : "✗"} 尾帧${(frames && frames[1]) ? "✓" : "✗"}`
       : `图${imgs.length} 视${c.media.video.length} 音${c.media.audio.length}`}${(!isFramesMode && !imgs.length) ? " · 无素材(纯文本)" : ""}）`, "#9fd0ff");

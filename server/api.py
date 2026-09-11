@@ -2880,7 +2880,12 @@ async def h3_prompt_preview(req):
         return _json({"ok": False, "error": str(exc)}, status=500)
     return _json({"ok": True, "prompt": out,
                   "roles": h3pmod.extract_role_names(prefix),
+                  # 把说话人编号与音色编号一并回显：前端「预览提示词」能直接核对
+                  # 「这句台词是谁说的 / 用第几号音色」（<Audio N> → ref_audio_{N-1}）
                   "dialogues": [{"speaker": d.get("speaker") or "",
+                                 "sid": d.get("sid") or "",
+                                 "audio": int(d.get("audio") or 0),
+                                 "inner": bool(d.get("inner")),
                                  "text": d.get("text") or ""} for d in dialogs]})
 
 
