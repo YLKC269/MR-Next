@@ -374,7 +374,13 @@ export function createTimelinePanel(ctx) {
         renderParam();
       };
       const hint = h("span", { class: "muted" }, MODE_HINT[P.mode] || "");
-      row.append(field("任务类型 task_type", msel), hint);
+      row.append(field("任务类型 task_type", msel), hint,
+        h("span", {
+          class: "muted", style: { fontSize: 10.5 },
+          title: "官方 MiniMaxH3Director 的 task_type 还支持 v2v（源视频改视频）与 rv2v（参考素材改视频）；"
+               + "这两条要源视频时间轴（<Video 1> + ref_videos/ref_video_audios 输入），本节点暂未接入 —— "
+               + "不是 H3 不支持，是本节点没做这两条输入链路。",
+        }, "（官方另有 v2v / rv2v：源视频编辑，本节点暂未接入）"));
     } else if (key === "model") {
       const mkS = (vals, cur) => sel(["", ...(vals || [])], cur || "");
       const unetE = mkS(opts.unets, P.model.unet); unetE.onchange = () => { P.model.unet = unetE.value; };
@@ -405,8 +411,8 @@ export function createTimelinePanel(ctx) {
       // ---- 视频分辨率：改用 VIDEO_SIZES 下拉 + 自定义 w/h，与「一键流水线」面板共享 store.vidSize/vidW/vidH ----
       const vidSizeSel = h("select", { class: "select", style: { width: "auto" } },
         ...VIDEO_SIZES.map(([label], i) => h("option", { value: String(i) }, label)));
-      const vidWIn = h("input", { class: "input", type: "number", min: 64, step: 32, style: { width: 70, display: "none" }, value: P.output.width });
-      const vidHIn = h("input", { class: "input", type: "number", min: 64, step: 32, style: { width: 70, display: "none" }, value: P.output.height });
+      const vidWIn = h("input", { class: "input", type: "number", min: 32, max: 8192, step: 32, style: { width: 70, display: "none" }, value: P.output.width });
+      const vidHIn = h("input", { class: "input", type: "number", min: 32, max: 8192, step: 32, style: { width: 70, display: "none" }, value: P.output.height });
       const syncVidCustom = () => {
         const i = Number(vidSizeSel.value);
         if (i === CUSTOM_VID_SIZE_INDEX) {
@@ -439,14 +445,25 @@ export function createTimelinePanel(ctx) {
           if (w && h) { P.output.width = w; P.output.height = h; if (P.__syncStoreFromP) P.__syncStoreFromP(); renderTrack(); }
         }
       });
-      const cfgE = num(P.output.cfg, "1", 64, 0.1); cfgE.oninput = () => { P.output.cfg = Number(cfgE.value) || 1; };
+      // 官方：cfg FLOAT 0–30（默认 1.0；H3 官方模板就是 cfg=1）
+      const cfgE = num(P.output.cfg, "1", 64, 0.05);
+      cfgE.min = 0; cfgE.max = 30;
+      cfgE.oninput = () => { P.output.cfg = Math.max(0, Math.min(30, Number(cfgE.value) || 0)); };
       const seedE = num(P.output.seed, "0", 84, 1); seedE.oninput = () => { P.output.seed = Number(seedE.value) || 0; };
-      const fpsE = sel((opts?.framerates || [24]).map(String), String(P.output.fps)); fpsE.onchange = () => { P.output.fps = Number(fpsE.value) || 24; };
+      // 官方：frame_rate FLOAT 1–240（默认 24；H3 按 24 训练）
+      const fpsE = num(P.output.fps, "24", 64, 1);
+      fpsE.min = 1; fpsE.max = 240;
+      fpsE.oninput = () => { P.output.fps = Math.max(1, Math.min(240, Number(fpsE.value) || 24)); };
       const secE = num(P.output.sec, "5", 64, 0.5); secE.oninput = () => { P.output.sec = Math.max(0.5, Number(secE.value) || 5); renderAll(); };
       const secAll = h("button", { class: "btn", style: { padding: "3px 8px", fontSize: 11 }, title: "把当前默认秒写入每个分镜", onclick: () => { const ss = ctx.store.get().shots || []; ss.forEach((_, i) => { shot(i).sec = P.output.sec; }); renderTrack(); renderEditor(); ctx.toast(`已设全部 ${ss.length} 镜为 ${P.output.sec}s`); } }, "设全镜秒");
-      const refE = num(P.output.ref_size, "864", 64, 32); refE.oninput = () => { P.output.ref_size = Number(refE.value) || 864; };
-      const stepsE = sel((opts?.steps || [25]).map(String), String(P.output.steps));
-      stepsE.onchange = () => { P.output.steps = Number(stepsE.value) || 25; if (stepsWarnPainter) stepsWarnPainter(); };
+      // 官方：ref_max_size INT 32–8192 step 32（默认 864）—— 参考图长边上限
+      const refE = num(P.output.ref_size, "864", 64, 32);
+      refE.min = 32; refE.max = 8192;
+      refE.oninput = () => { P.output.ref_size = Math.max(32, Math.min(8192, Number(refE.value) || 864)); };
+      // 官方：steps INT 1–200（默认 25）→ 用自由输入（以前是固定下拉，值不全）
+      const stepsE = num(P.output.steps, "25", 64, 1);
+      stepsE.min = 1; stepsE.max = 200;
+      stepsE.oninput = () => { P.output.steps = Math.max(1, Math.min(200, Number(stepsE.value) || 25)); if (stepsWarnPainter) stepsWarnPainter(); };
       const samplerE = sel((opts?.samplers || ["res_multistep"]), P.output.sampler || "res_multistep"); samplerE.onchange = () => { P.output.sampler = samplerE.value; };
       const schedE = sel((opts?.schedulers || ["simple"]), P.output.scheduler || "simple"); schedE.onchange = () => { P.output.scheduler = schedE.value; };
       // 采样方案按钮组（采样器+调度器组合预设，一键切换）
@@ -508,7 +525,10 @@ export function createTimelinePanel(ctx) {
         });
       };
       renderQual();
-      const sVE = num(P.output.shift_video, "12", 64, 0.5); sVE.oninput = () => { P.output.shift_video = Number(sVE.value) || 0; };
+      // 官方：shift_video / shift_audio FLOAT 0.01–100（默认 12 / 3，训练值别乱动）
+      const sVE = num(P.output.shift_video, "12", 64, 0.1);
+      sVE.min = 0.01; sVE.max = 100;
+      sVE.oninput = () => { P.output.shift_video = Math.max(0.01, Math.min(100, Number(sVE.value) || 12)); };
       const sAE = num(P.output.shift_audio, "3", 64, 0.5); sAE.oninput = () => { P.output.shift_audio = Number(sAE.value) || 0; };
       const ck = (val, fn, label, official) => h("label", { class: "row", style: { gap: 5, cursor: "pointer", padding: "4px 6px" } },
         h("input", { type: "checkbox", checked: val ? "checked" : null, onchange: (e) => fn(e.target.checked), style: { accentColor: "#ffd166" } }),

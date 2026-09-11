@@ -3393,6 +3393,24 @@ def _clip_note(name):
     return ""
 
 
+def _official_samplers():
+    """官方 MiniMaxH3Director 用的采样器/调度器清单 = ComfyUI 全量（comfy.samplers.KSampler.*）。
+
+    官方 nodes/director.py 里就是 `comfy.samplers.KSampler.SAMPLERS` / `.SCHEDULERS`，
+    所以这里同源取，保证和官方导演台完全一致；取不到时回退到常用子集（不让面板变空）。
+    """
+    try:
+        import comfy.samplers as _cs
+        s = list(_cs.KSampler.SAMPLERS)
+        c = list(_cs.KSampler.SCHEDULERS)
+        if s and c:
+            return s, c
+    except Exception:  # noqa: BLE001
+        pass
+    return (["euler", "res_multistep", "euler_cfg", "uni_pc"],
+            ["simple", "normal", "karras", "exponential"])
+
+
 async def editor_options(req):
     """GET /mrnext/editor/options —— 导演台编辑器下拉选项（从本机模型目录枚举）。
     Query:
@@ -3488,8 +3506,27 @@ async def editor_options(req):
         "segLengths": [2, 3, 4, 5, 6, 8, 10, 15],
         "overlapFrames": [5, 9, 22, 39, 56],
         "steps": [8, 12, 15, 20, 25, 30, 40],
-        "samplers": ["euler", "res_multistep", "euler_cfg", "uni_pc"],
-        "schedulers": ["simple", "normal", "karras", "exponential"],
+        # 采样器/调度器 = 官方 MiniMaxH3Director 同源清单（comfy.samplers.KSampler.SAMPLERS / SCHEDULERS）
+        # 官方节点这两个参数就是直接喂这两个全量列表 → 这里也取全量，装了新采样器会自动出现在下拉里
+        "samplers": _official_samplers()[0],
+        "schedulers": _official_samplers()[1],
+        # 官方 INPUT_TYPES 的默认值/范围（前端据此标 min/max，避免"和官方不一样"）
+        "official": {
+            "steps": {"default": 25, "min": 1, "max": 200},
+            "cfg": {"default": 1.0, "min": 0.0, "max": 30.0, "step": 0.01},
+            "sampler": {"default": "res_multistep"},
+            "scheduler": {"default": "simple"},
+            "shift_video": {"default": 12.0, "min": 0.01, "max": 100.0},
+            "shift_audio": {"default": 3.0, "min": 0.01, "max": 100.0},
+            "frame_rate": {"default": 24.0, "min": 1.0, "max": 240.0},
+            "width": {"default": 864, "min": 32, "max": 8192, "step": 32},
+            "height": {"default": 480, "min": 32, "max": 8192, "step": 32},
+            "ref_max_size": {"default": 864, "min": 32, "max": 8192, "step": 32},
+            "total_frames": {"default": 124, "min": 5},
+            "clear_vram_between_segments": {"default": True},
+            "export_source_images": {"default": False},
+            "task_types": ["t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v", "mixed"],
+        },
         "betas": [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 5.0],
         "shiftVideo": [0.0, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0],
         "shiftAudio": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
