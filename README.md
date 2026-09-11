@@ -1,11 +1,42 @@
 # MR分镜助手导演台 · Next — 安装流程与使用教程
 
-> 版本：**v1.11.11** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
+> 版本：**v1.11.12** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
 >
 > 官方 MiniMax H3 出片引擎已内嵌在包内，**不需要另外安装任何节点**（VOSR2 / SeedVR2 是可选增强，装了才启用）。
 
 <details open>
-<summary><b>本次更新 · v1.11.11（点开看变化）</b></summary>
+<summary><b>本次更新 · v1.11.12（点开看变化）</b></summary>
+
+**① 修复「完全出不了片」：T8 双时钟不再阻断采样**
+
+线上报错（`miniMaxH3Director` 节点，`r2v` / `608×1024` / 192 帧）：
+
+```
+ValueError: 无法从 AV latent 解出双时钟切分：latent 形状=()、latent_shapes=None
+  core_sampling.py:101 _dual_clock_latent_shape
+```
+
+原因是双时钟需要把 packed latent 切回「视频段 / 音频段」，而在 `FLOW_AV` 这条链路上
+latent 既不是 nested、模型也没有给出 `latent_shapes` —— 三种来源全部落空，
+旧代码在这里**直接抛错**，于是整段视频一步都跑不了。
+
+现在改成 **解不出就回退官方单时钟**（并打一条告警），**绝不抛错阻断出片**。
+
+**② 双时钟默认关闭，采样回到官方路径**
+
+- 节点输入 **`dual_clock` 默认改为 `False`**（原来是 `True`），`steps_audio` 默认 `0`。
+- `dual_clock=False` 时采样完全走官方链路：
+  `MiniMaxH3SigmaShift(12/3)` → `BasicScheduler` → `KSamplerSelect` → `SamplerCustomAdvanced`。
+- 双时钟保留为**可选实验分支**：想试就手动把开关打开；开关打开但切分解不出时，
+  仍然自动回退官方单时钟 —— 也就是说**任何情况下都能出片**。
+
+> 旧的已保存工作流里如果残留 `dual_clock=true`，行为也不再是"开不了就跑不了"，
+> 最坏情况是打一条告警然后照常按官方单时钟出片。
+
+</details>
+
+<details>
+<summary><b>上一版 · v1.11.11（点开看变化）</b></summary>
 
 **① 时间线面板「视频分辨率」不再重复 —— 只保留顶部一份**
 

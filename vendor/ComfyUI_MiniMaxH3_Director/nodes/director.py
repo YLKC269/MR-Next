@@ -144,22 +144,22 @@ class MiniMaxH3Director:
                 "dual_clock": (
                     "BOOLEAN",
                     {
-                        "default": True,
+                        "default": False,
                         "tooltip": (
-                            "T8 双时钟采样：音频在自己的时钟上推进（不被缩放骑到视频时钟）。"
-                            "低步数（4/8 步 Turbo）时避免音频被粗步长拉爆 → 爆音/白噪声，"
-                            "同时保证音频跑满自己的 σ 全程（不截断）。关闭则退回官方单时钟。"
+                            "【实验，默认关闭】T8 双时钟采样：音频在自己的时钟上推进"
+                            "（不被缩放骑到视频时钟）。仅在低步数（4/8 步 Turbo）"
+                            "想让音频更稳时可试；无法解出 AV latent 切分时会自动回退"
+                            "官方单时钟。关闭 = 官方单时钟（推荐，稳定出片）。"
                         ),
                     },
                 ),
                 "steps_audio": (
                     "INT",
                     {
-                        "default": 8, "min": 0, "max": 200, "step": 1,
+                        "default": 0, "min": 0, "max": 200, "step": 1,
                         "tooltip": (
-                            "音频独立步数（双时钟开启时生效）。0 = 跟随视频步数。"
-                            "T8 官方推荐「双 8 步」（视频 8 + 音频 8）；"
-                            "音频步数更大 → 每步跨的 σ 更小 → 音频收敛更平滑。"
+                            "音频独立步数（仅在上面的双时钟开启时生效）。"
+                            "0 = 跟随视频步数（默认）。"
                         ),
                     },
                 ),
@@ -249,8 +249,8 @@ class MiniMaxH3Director:
         seed=0,
         shift_video=12.0,
         shift_audio=3.0,
-        dual_clock=True,
-        steps_audio=8,
+        dual_clock=False,
+        steps_audio=0,
         clear_vram_between_segments=True,
         export_source_images=False,
         **kwargs,
