@@ -236,6 +236,12 @@ class DirectorPlan:
     sample_sigmas_linked: bool = False
     sample_shift_video: float = 12.0
     sample_shift_audio: float = 3.0
+    # T8 双时钟采样：音频在自己的时钟上推进，避免低步数（4/8 步 Turbo）时
+    # 音频被视频的粗步长拉爆 → 爆音/白噪声。steps_audio=0 表示跟随视频步数。
+    sample_dual_clock: bool = False
+    sample_steps_audio: int = 0
+    # 输出端音频完整性审计结果（只报告）：schema/checked/hard_finding_codes 等。
+    audio_integrity: dict = None
 
     @property
     def segment_count(self) -> int:

@@ -141,6 +141,28 @@ class MiniMaxH3Director:
                     "FLOAT",
                     {"default": 3.0, "min": 0.01, "max": 100.0, "step": 0.01, "tooltip": "MiniMaxH3SigmaShift shift_audio."},
                 ),
+                "dual_clock": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "T8 双时钟采样：音频在自己的时钟上推进（不被缩放骑到视频时钟）。"
+                            "低步数（4/8 步 Turbo）时避免音频被粗步长拉爆 → 爆音/白噪声，"
+                            "同时保证音频跑满自己的 σ 全程（不截断）。关闭则退回官方单时钟。"
+                        ),
+                    },
+                ),
+                "steps_audio": (
+                    "INT",
+                    {
+                        "default": 8, "min": 0, "max": 200, "step": 1,
+                        "tooltip": (
+                            "音频独立步数（双时钟开启时生效）。0 = 跟随视频步数。"
+                            "T8 官方推荐「双 8 步」（视频 8 + 音频 8）；"
+                            "音频步数更大 → 每步跨的 σ 更小 → 音频收敛更平滑。"
+                        ),
+                    },
+                ),
                 **director_perf_inputs(),
                 "sigmas": (
                     "SIGMAS",
@@ -227,6 +249,8 @@ class MiniMaxH3Director:
         seed=0,
         shift_video=12.0,
         shift_audio=3.0,
+        dual_clock=True,
+        steps_audio=8,
         clear_vram_between_segments=True,
         export_source_images=False,
         **kwargs,
@@ -265,6 +289,8 @@ class MiniMaxH3Director:
                     sigmas=sigmas,
                     shift_video=shift_video,
                     shift_audio=shift_audio,
+                    dual_clock=dual_clock,
+                    steps_audio=steps_audio,
                     clear_vram_between_segments=clear_vram_between_segments,
                 )
             )

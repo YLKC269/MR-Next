@@ -478,16 +478,16 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
   background: rgba(0,0,0,.25); font-size: 11px; font-weight: 800; display: inline-block; }
 .mtxt { pointer-events: none; }
 
-/* ---- 导演台：素材九宫格 + 提示词左右分栏 ---- */
-/* 预览框尺寸（定死）：宽高恒定，任何状态都不变，避免出片/切模式时整行重排崩版 */
+/* ---- 导演台：素材九宫格 + 提示词 + 实时预览 三栏 ---- */
+/* 预览框尺寸恒定（宽高同步、任何状态都不变），避免出片/切模式时整行重排崩版。
+   具体数值见文件下方「全局自适应」段的 --mm-pv（随节点宽度等比）。 */
 .mm-split { display: flex; gap: 10px; align-items: stretch; min-height: 214px; }
 .mm-media { flex: 0 0 auto; width: 238px; min-width: 0; display: flex; flex-direction: column; gap: 3px;
   overflow-y: auto; overflow-x: hidden; max-height: 210px; }
 .mm-prompt { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .mm-prompt .mention-ed { flex: 1 1 auto; min-height: 84px; max-height: 210px; resize: none; }
-/* 实时预览：定死正方形框，钉在提示词文本区右侧 */
-.mm-preview { flex: 0 0 210px; width: 210px; min-width: 210px; max-width: 210px;
-  height: 210px; min-height: 210px; max-height: 210px; box-sizing: border-box;
+/* 实时预览：正方形框，钉在提示词文本区右侧（尺寸由 --mm-pv 统一给出） */
+.mm-preview { box-sizing: border-box;
   display: flex; flex-direction: column; gap: 4px; overflow: hidden;
   padding: 6px; border: 1px solid rgba(120,170,255,.18); border-radius: 10px; background: rgba(8,14,28,.55); }
 .mm-preview .mm-pv-title { font-size: 11px; font-weight: 700; color: #7ee2a0; flex: 0 0 auto; line-height: 1.3; }
@@ -877,7 +877,11 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 .mrnext-root { container-type: size; container-name: mrpanel;
   /* 素材宫格单格尺寸（旧 44px 的 1.7 倍）：随面板宽度等比，节点缩放同步 */
   /* 实测容器宽 ≈971px（节点 1100 减去 ComfyUI 内边距）→ 7.72cqw ≈ 75px = 旧 44px 的 1.7 倍 */
-  --mm-cell: clamp(56px, 7.72cqw, 86px); --mm-gap: clamp(5px, .7cqw, 10px); }
+  --mm-cell: clamp(56px, 7.72cqw, 86px); --mm-gap: clamp(5px, .7cqw, 10px);
+  /* 时间线实时预览框边长：与提示词文本区竞争同一条横向空间。
+     旧值 15.5cqw（971px 下仅 150px）明显偏小、文本区白占一大片 → 提到 22cqw（≈214px）。
+     上限 280px 避免超宽屏下预览吃掉全部正文宽度；下限 168px 保证仍能看清画面。 */
+  --mm-pv: clamp(168px, 22cqw, 280px); }
 .mx-header { padding: clamp(7px, 0.95cqw, 13px) clamp(9px, 1.25cqw, 17px); }
 .mx-title { font-size: clamp(12.5px, 1.42cqw, 16.5px); letter-spacing: clamp(.2px, .04cqw, .6px); }
 .mx-sub { font-size: clamp(9.5px, 0.92cqw, 11.5px); }
@@ -907,12 +911,15 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 .mm-split { gap: 0; flex: 1 1 auto; min-height: clamp(190px, 26cqh, 300px); align-items: stretch; }
 .mm-media { width: calc(var(--mm-cell, 75px) * 3 + var(--mm-gap, 7px) * 2 + 4px);
   max-height: none; padding-right: 10px; border-right: 1px solid rgba(120,170,255,.16); }
-.mm-prompt { padding-left: 10px; }
+/* 提示词文本区：不再无限拉伸（旧实现它吃掉全部剩余宽度 = 用户反馈"文本框太宽、挤压预览"）。
+   max-width 让富余空间主动让给右侧预览框；min-width 0 保证窄面板下能正常收缩。 */
+.mm-prompt { padding-left: 10px; padding-right: 10px; max-width: 680px; min-width: 0; }
 .mm-prompt .mention-ed { max-height: none; }
-.mm-preview { flex: 0 0 clamp(140px, 15.5cqw, 216px); width: clamp(140px, 15.5cqw, 216px);
-  min-width: clamp(140px, 15.5cqw, 216px); max-width: clamp(140px, 15.5cqw, 216px);
-  height: clamp(140px, 15.5cqw, 216px); min-height: clamp(140px, 15.5cqw, 216px); max-height: clamp(140px, 15.5cqw, 216px); }
-.mm-preview { margin-left: clamp(7px, .85cqw, 11px); }
+/* 实时预览框：跟着 --mm-pv 走，正方形恒定（宽高同步），不跳版 */
+.mm-preview { flex: 0 0 var(--mm-pv); width: var(--mm-pv);
+  min-width: var(--mm-pv); max-width: var(--mm-pv);
+  height: var(--mm-pv); min-height: var(--mm-pv); max-height: var(--mm-pv); }
+.mm-preview { margin-left: auto; }
 .mm-pv-title { font-size: clamp(10px, .95cqw, 11.5px); }
 /* 剪辑轨道：随高度自适应，标尺不挤 */
 .ed-ruler { height: clamp(17px, 2.2cqh, 24px) !important; }

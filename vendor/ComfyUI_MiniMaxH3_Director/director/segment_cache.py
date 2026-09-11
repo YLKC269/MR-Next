@@ -146,6 +146,9 @@ def first_pass_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[s
         "sampler": str(getattr(plan, "sample_sampler", "") or ""),
         "shift_video": round(float(getattr(plan, "sample_shift_video", 12.0) or 12.0), 6),
         "shift_audio": round(float(getattr(plan, "sample_shift_audio", 3.0) or 3.0), 6),
+        # 双时钟：换了采样时钟/音频步数 → 产物不同，缓存必须失效。
+        "dual_clock": bool(getattr(plan, "sample_dual_clock", False)),
+        "steps_audio": int(getattr(plan, "sample_steps_audio", 0) or 0),
     })
     if linked:
         fp["steps"] = 0

@@ -495,6 +495,13 @@ export function createMentionEditor(ctx, { initial = "", favorites = [], assets 
                 ctx.toast(`已绑定 ${tagKey} → ${a.name}`);
                 box.rerender && box.rerender(true);   // 程序化绑定：box 有焦点也要刷新 chip 显示
               } else if (replaceFirstTag(tag, currentN, cardTag, a.index)) {
+                // 导演台（非权威）：文本里写的是 <Tag N> 这种"位置号"。素材库一旦拖拽换序，
+                // 位置号会静默漂移 → chip 显示/送进模型的音色/参考图就不是刚点的那个了
+                // （用户实报：toast 说 <Audio 3>春桃配音，chip 却显示沈砚之配音）。
+                // 这里补一条按 rel 的身份绑定：tagTokenHTML 会优先按 rel 解析，彻底免疫重排。
+                if (isUsableRel(a.rel)) {
+                  assetRegistry.setTagBinding(`<${cardTag} ${a.index}>`, a.rel);
+                }
                 ctx.toast(`已替换为 <${cardTag} ${a.index}>（${a.name}）`);
               }
               close();

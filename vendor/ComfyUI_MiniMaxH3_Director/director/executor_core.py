@@ -29,6 +29,7 @@ from .audio_export import (
     empty_audio_dict,
     resolve_audio_mode,
 )
+from .audio_integrity import check_export_audio_integrity
 from .segment_runtime import (
     frames_label,
     resolve_segment_raw_clip,
@@ -377,6 +378,8 @@ def execute_director_plan_core(
     sigmas=None,
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
+    dual_clock: bool = False,
+    steps_audio: int = 0,
     clear_vram_between_segments: bool = True,
 ) -> tuple[
     torch.Tensor,
@@ -399,6 +402,8 @@ def execute_director_plan_core(
     plan.sample_sigmas_linked = first_pass_sigmas is not None
     plan.sample_shift_video = float(shift_video)
     plan.sample_shift_audio = float(shift_audio)
+    plan.sample_dual_clock = bool(dual_clock)
+    plan.sample_steps_audio = int(steps_audio or 0)
     audio_mode = resolve_audio_mode(plan)
     decode_audio = audio_mode == AUDIO_MODE_GENERATE
     # UI toggle on the player bar (timeline.liveTaePreview); default off.
@@ -1033,6 +1038,8 @@ def execute_director_plan_core(
                 on_phase=_report_sample_phase,
                 on_step_preview=_report_step_preview if live_tae_preview else None,
                 preview_every=1,
+                dual_clock=bool(dual_clock),
+                steps_audio=int(steps_audio or 0),
             )
 
         first_pass_samples = samples
@@ -1150,6 +1157,8 @@ def execute_director_plan_core(
                 scheduler=scheduler,
                 shift_video=shift_video,
                 shift_audio=shift_audio,
+                dual_clock=bool(dual_clock),
+                steps_audio=int(steps_audio or 0),
                 on_phase=_report_sample_phase,
                 on_step_preview=_report_step_preview if live_tae_preview else None,
                 first_pass_images=upscale_frames,
@@ -1505,6 +1514,29 @@ def execute_director_plan_core(
             "Re-run them once (or run all) to refresh audio cache."
         )
     export_frame_counts = [int(c.shape[0]) for c in export_chunks]
+    # ── 输出端音频完整性审计（T8 双时钟的"双保险"之一）──────────────
+    # 只报告、不改动：确认每段音频长度与音画边界是否对齐、有无 NaN/削波/爆音。
+    # 硬问题（hard）才进 reports；尾接头一类启发式 (advisory) 留在 JSON 里不刷屏。
+    try:
+        _aud_ok, _aud_lines, _aud_summary = check_export_audio_integrity(
+            export_audios,
+            frame_counts=export_frame_counts,
+            fps=float(plan.frame_rate or 24),
+            audio_mode=audio_mode,
+            muted=(audio_mode == AUDIO_MODE_MUTE),
+        )
+        plan.audio_integrity = _aud_summary
+        reports.append(
+            f"Audio integrity: schema={_aud_summary.get('schema')} "
+            f"checked={_aud_summary.get('checked')} "
+            f"hard={len(_aud_summary.get('hard_finding_codes') or [])} "
+            f"advisory={len(_aud_summary.get('advisory_finding_codes') or [])} "
+            f"all_ok={_aud_ok}"
+        )
+        for _line in _aud_lines:
+            reports.append(_line)
+    except Exception as _aud_err:  # 审计绝不拖垮出片
+        reports.append(f"Audio integrity: SKIPPED ({_aud_err})")
     # segment_outputs path (分段导出 / image batch): keep run-order audios.
     if plan.export_mode == "all" and output_chunks:
         segment_audios = export_audios
