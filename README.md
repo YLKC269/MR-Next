@@ -1,11 +1,39 @@
 # MR分镜助手导演台 · Next — 安装流程与使用教程
 
-> 版本：**v1.11.0** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
+> 版本：**v1.11.1** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
 >
 > 官方 MiniMax H3 出片引擎已内嵌在包内，**不需要另外安装任何节点**（VOSR2 / SeedVR2 是可选增强，装了才启用）。
 
 <details open>
-<summary><b>本次更新 · v1.11.0（点开看变化）</b></summary>
+<summary><b>本次更新 · v1.11.1（点开看变化）</b></summary>
+
+**「导出 / 音频 / 连续性开关 + 百万像素」四项正式接入 UI（本版）**
+
+上一版（v1.11.0）已经能把这三个官方开关写进工作流，但**只有导演台能改**；本版把四个控件全部接进「一键流水线」面板，并让两个面板**双向联动**。
+
+| 控件 | 一键流水线面板（新增） | 导演台（原有，现与流水线同源） |
+|---|---|---|
+| **导出模式**（官方 `exportMode`） | `🎬 全部导出（拼接）` / `📦 分段导出（独立）` 下拉 | 工具条那个导出按钮 + 文案同步 |
+| **音频模式**（官方 `audioMode`） | `🔊 生成人声` / `🤐 完全静音` 下拉 | 「🎙️ 声音」页「音频模式」下拉 |
+| **段间连续性**（`continuityEnabled`） | 勾选框 + `5/9/22/39/56 帧` 重叠帧下拉（不勾时下拉置灰） | 「📐 采样设置」页同款 |
+| **百万像素**（官方 `ResolutionSelector`） | `MP:` 输入框（0.1–2） | 采样设置页 `H3 百万像素` + 工具条那个 `MP` 框 |
+
+**统一到 store 做唯一状态源**（`store.exportMode / continuity / continuityOverlap / audioMute / vidMP`）
+- 任一面板改动 → 另一面板立即跟着变（按钮文案、勾选态、下拉值都会回填）；导演台面板在启动时就订阅 store，所以**直接开流水线改也不会丢**
+- `mpToWH()` 算式统一收在 `core/sizes.js`（与官方 `ResolutionSelector` 同源：`W = round(aw·√(MP·1024²/(aw·ah))/32)·32`，MP 钳 0.1–2），导演台与流水线共用一份，不再各写一遍
+- 百万像素生效前提：后端会把 `output.mode` 一并写成 **`fixed`**（官方只有 `fixed` 才按 width/height 出图），否则 MP 算出来的尺寸会被 `long_edge` 模式忽略
+
+**一次性迁移兜底**：老版本这四个开关只存在导演台参数里，首次打开时若 store 还是默认值、而导演台参数里确有用户选择，则把选择灌进 store；**反之（store 已被流水线设定）不会被默认值冲掉**（这条顺序一开始写反了，实测把流水线的设定反向冲回默认，已修）。
+
+**验证（真机）**：新增 `outflags_e2e` **30 项** —— 控件齐全/默认值、流水线改→store 落值、store→导演台回填（按钮文案/MP 回填/勾选态/下拉）、导演台改→store 回落、以及**干跑 `/mrnext/h3/dry` 拿构图断言** `output.mode=fixed / megapixels=1 / exportMode=segments / audioMode=mute / continuityEnabled=true / continuityOverlapFrames=22 / width×height=MP 算出的尺寸` 全部落位；
+回归：ui_fit 21 / align_refs 14 / prod_tpl 18 / assets_nodupe 11 / shotfmt 25 / final 26 / t_split 6 / t_shotfmt 19 / t_prodtpl 31 / t_frames 8 / t_external 21 / t_prodtpl_api 69 **全绿**（0 失败）。
+
+**仍未接入（如实列出）**：`v2v / rv2v / mixed` 三种 task_type、`sigmas` 外接噪声表。
+
+</details>
+
+<details>
+<summary><b>v1.11.0（点开看变化）</b></summary>
 
 **① 参考槽「按编号」接线 + 官方导出/音频/连续性开关落地（本版）**
 

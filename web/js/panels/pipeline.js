@@ -2,7 +2,7 @@
 import { h } from "../core/dom.js";
 import {
   SIZES, DEFAULT_SIZE_INDEX, CUSTOM_SIZE_INDEX, resolveSize,
-  VIDEO_SIZES, DEFAULT_VID_SIZE_INDEX, CUSTOM_VID_SIZE_INDEX, resolveVidSize,
+  VIDEO_SIZES, DEFAULT_VID_SIZE_INDEX, CUSTOM_VID_SIZE_INDEX, resolveVidSize, mpToWH,
 } from "../core/sizes.js";
 import { parsePrefixDef, planDefinitionJobs } from "../core/prefix_parser.js";
 import { createLoraControls } from "./lora_controls.js";
@@ -51,6 +51,12 @@ export function createPipelinePanel(ctx) {
       cfg: output.cfg, shift_video: output.shift_video, shift_audio: output.shift_audio,
       sampler: output.sampler || undefined, scheduler: output.scheduler || undefined,
       clear_vram_between_segments: output.clear_vram || undefined,
+      // H3 官方输出三开关 + 百万像素（与导演台「⚙ 采样设置 / 🎙️ 声音」页同源，写进 timeline_data.output）
+      megapixels: output.megapixels || undefined,                                    // 0.1–2，>0 时后端按比例换算宽高
+      export_mode: output.exportMode === "segments" ? "segments" : "all",            // 整条拼接 / 分段独立
+      audio_mode: audio.no_speech ? "mute" : "generate",                             // 完全无人声 / 正常生成
+      continuity: output.continuity ? true : undefined,                              // continuityEnabled：段间重叠帧衔接
+      continuity_overlap: output.continuity ? (Number(output.continuity_overlap) || 9) : undefined,
       speed_node: speed.node && speed.node !== "off" ? speed.node : undefined,
       speed_device: speed.dev === "auto" ? undefined : speed.dev,
       speed_lora: speed.lora && speed.lora !== "(无)" ? speed.lora : undefined,
@@ -398,16 +404,63 @@ export function createPipelinePanel(ctx) {
   vidSizeSel.value = String(ctx.store.get().vidSize ?? DEFAULT_VID_SIZE_INDEX);
   vidWIn.value = ctx.store.get().vidW || 720;
   vidHIn.value = ctx.store.get().vidH || 1280;
+  // ---- H3 官方 output 三开关（导出模式 / 音频模式 / 段间连续性），与「时间线」导演台共享 store ----
+  const expSel = h("select", { class: "select", style: { width: "auto" },
+    title: "官方 exportMode：all=整条自动拼接成一条视频；segments=每镜独立导出" },
+    h("option", { value: "all" }, "🎬 全部导出（拼接）"),
+    h("option", { value: "segments" }, "📦 分段导出（独立）"));
+  const amodeSel = h("select", { class: "select", style: { width: "auto" },
+    title: "官方 audioMode：generate=正常生成人声；mute=完全无人声（纯环境音/配乐）" },
+    h("option", { value: "generate" }, "🔊 生成人声"),
+    h("option", { value: "mute" }, "🤐 完全静音"));
+  const contCk = h("input", { type: "checkbox", style: { accentColor: "#ffd166" },
+    title: "官方 continuityEnabled：段与段之间用重叠帧衔接（与提示词级「衔接下镜」不同）" });
+  const contOvSel = h("select", { class: "select", style: { width: "auto" }, title: "官方 continuityOverlapFrames" },
+    ...[5, 9, 22, 39, 56].map((n) => h("option", { value: String(n) }, String(n) + " 帧")));
+  const syncOutFlags = () => {
+    const st = ctx.store.get();
+    if (expSel.value !== (st.exportMode === "segments" ? "segments" : "all")) expSel.value = (st.exportMode === "segments" ? "segments" : "all");
+    if (amodeSel.value !== (st.audioMute ? "mute" : "generate")) amodeSel.value = st.audioMute ? "mute" : "generate";
+    contCk.checked = !!st.continuity;
+    contOvSel.value = String(Number(st.continuityOverlap) || 9);
+    contOvSel.disabled = !st.continuity;
+  };
+  expSel.onchange = () => { ctx.store.set({ exportMode: expSel.value === "segments" ? "segments" : "all" }); syncOutFlags(); };
+  amodeSel.onchange = () => { ctx.store.set({ audioMute: amodeSel.value === "mute" }); syncOutFlags(); };
+  contCk.onchange = () => { ctx.store.set({ continuity: !!contCk.checked }); syncOutFlags(); };
+  contOvSel.onchange = () => { ctx.store.set({ continuityOverlap: Number(contOvSel.value) || 9 }); syncOutFlags(); };
+  syncOutFlags();
   syncVidCustomVisible();
-  vidSizeSel.onchange = () => { ctx.store.set({ vidSize: Number(vidSizeSel.value) || 0 }); syncVidCustomVisible(); };
-  vidWIn.oninput = () => { ctx.store.set({ vidW: Number(vidWIn.value) || 0 }); };
-  vidHIn.oninput = () => { ctx.store.set({ vidH: Number(vidHIn.value) || 0 }); };
+  // H3 官方百万像素直填（0.1–2）：与「时间线」工具栏那个 MP 共用 store.vidMP，填了就按当前比例算宽高
+  const vidMPIn = h("input", {
+    class: "input", type: "number", min: 0.1, max: 2, step: 0.1, placeholder: "MP",
+    style: { width: 58, display: "none" },
+    title: "MiniMax H3 官方百万像素（0.1–2）：填了就按当前比例算出宽高，并写进工作流（留空=用上面的宽高）",
+  });
+  const syncVidMPVisible = () => {
+    const mpOn = Number(ctx.store.get().vidMP || 0) > 0;
+    vidMPIn.style.display = (Number(vidSizeSel.value) === CUSTOM_VID_SIZE_INDEX || mpOn) ? "" : "none";
+    vidMPIn.value = mpOn ? String(ctx.store.get().vidMP) : "";
+  };
+  vidMPIn.onchange = () => {
+    const raw = Number(vidMPIn.value);
+    if (!raw || raw <= 0) { ctx.store.set({ vidMP: 0 }); syncVidMPVisible(); return; }
+    const mp = Math.max(0.1, Math.min(2, Math.round(raw * 100) / 100));
+    const [w, hh] = mpToWH(mp, ctx.store.get().vidW || 720, ctx.store.get().vidH || 1280);
+    ctx.store.set({ vidMP: mp, vidW: w, vidH: hh, vidSize: CUSTOM_VID_SIZE_INDEX });
+    syncVidMPVisible();
+  };
+  vidSizeSel.onchange = () => { ctx.store.set({ vidSize: Number(vidSizeSel.value) || 0, vidMP: 0 }); syncVidCustomVisible(); syncVidMPVisible(); };
+  vidWIn.oninput = () => { ctx.store.set({ vidW: Number(vidWIn.value) || 0, vidMP: 0 }); syncVidMPVisible(); };
+  vidHIn.oninput = () => { ctx.store.set({ vidH: Number(vidHIn.value) || 0, vidMP: 0 }); syncVidMPVisible(); };
   ctx.store.subscribe((st) => {
     if (st.vidSize != null && String(st.vidSize) !== vidSizeSel.value) vidSizeSel.value = String(st.vidSize);
     if (st.vidW != null && Number(vidWIn.value) !== Number(st.vidW)) vidWIn.value = st.vidW;
     if (st.vidH != null && Number(vidHIn.value) !== Number(st.vidH)) vidHIn.value = st.vidH;
     syncVidCustomVisible();
+    syncVidMPVisible();
   });
+  syncVidMPVisible();
 
   const el = h(
     "div",
@@ -433,9 +486,20 @@ export function createPipelinePanel(ctx) {
         "自动开启（推荐，保持镜头连贯）"),
       h("span", { class: "muted", style: { fontSize: 10.5, opacity: 0.7 } }, "↔ 联动时间线面板「⇄ 全部衔接」")),
     // 视频分辨率（与「时间线」导演台共享 store.vidSize/vidW/vidH，双向联动）
-    h("div", { class: "row", style: { flexWrap: "wrap", gap: 4, alignItems: "center" } },
+      h("div", { class: "row", style: { flexWrap: "wrap", gap: 4, alignItems: "center" } },
       h("span", { class: "muted", style: { fontSize: 11.5 } }, "视频分辨率:"),
       vidSizeSel, vidWIn, h("span", { class: "muted", style: { fontSize: 11 } }, "×"), vidHIn,
+      h("span", { class: "muted", style: { fontSize: 11.5, marginLeft: 6 } }, "MP:"), vidMPIn,
+      h("div", { class: "mx-spacer" }),
+      h("span", { class: "muted", style: { fontSize: 10.5, opacity: 0.7 } }, "↔ 与「时间线」导演台")),
+    // H3 官方 output 三开关（导出模式 / 音频模式 / 段间连续性）——与导演台「⚙ 采样设置 / 🎙️ 声音」页联动
+    h("div", { class: "row", style: { flexWrap: "wrap", gap: 4, alignItems: "center", padding: "6px 8px",
+      background: "rgba(127,208,255,.06)", border: "1px solid #24486b", borderRadius: 7 } },
+      h("span", { style: { fontSize: 11, color: "#7fd0ff", fontWeight: 700, marginRight: 4 } }, "🎞 H3 输出"),
+      expSel,
+      h("span", { class: "muted", style: { fontSize: 11.5, marginLeft: 2 } }, "音频:"), amodeSel,
+      h("label", { class: "row", style: { gap: 5, cursor: "pointer", fontSize: 11.5, color: "#d0e0f0", marginLeft: 4 } },
+        contCk, "段间连续性"), contOvSel,
       h("div", { class: "mx-spacer" }),
       h("span", { class: "muted", style: { fontSize: 10.5, opacity: 0.7 } }, "↔ 与「时间线」导演台")),
     note,

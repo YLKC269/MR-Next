@@ -73,6 +73,19 @@ export const VIDEO_SIZES = [
 export const DEFAULT_VID_SIZE_INDEX = 1;
 export const CUSTOM_VID_SIZE_INDEX = VIDEO_SIZES.length - 1;
 
+// MiniMax H3 官方「百万像素」→ 宽高（与官方 ResolutionSelector 同一算式：
+//   vendor/ComfyUI_MiniMaxH3_Director/director/refine_pack.py::resolution_from_selector）
+//   W = round(aw·√(MP·1024²/(aw·ah))/32)·32   （aw:ah = 当前宽高比；MP 官方钳 0.1–2）
+// 采样设置页 / 工具栏 / 一键流水线 三处共用，改一处即全对。
+export const mpToWH = (mp, w0, h0) => {
+  const w = Math.max(1, Math.round(Number(w0) || 16)), hh = Math.max(1, Math.round(Number(h0) || 9));
+  const g = (a, b) => (b ? g(b, a % b) : a);
+  const k = g(w, hh) || 1, aw = w / k, ah = hh / k;
+  const v = Math.max(0.1, Math.min(2, Number(mp) || 0));
+  const scale = Math.sqrt((v * 1024 * 1024) / (aw * ah));
+  return [Math.max(32, Math.round((aw * scale) / 32) * 32), Math.max(32, Math.round((ah * scale) / 32) * 32)];
+};
+
 export function resolveVidSize(index, customW, customH) {
   const i = Number(index) || 0;
   if (i === CUSTOM_VID_SIZE_INDEX) {

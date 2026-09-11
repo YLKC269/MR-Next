@@ -7,7 +7,7 @@ import { createMentionEditor } from "../core/mentions.js";
 import { assetRegistry } from "../core/assets.js";
 import { lightbox, closeLightbox } from "../core/ui.js";
 import { stripVirtualRefs, isUsableRel } from "../core/purify.js";
-import { VIDEO_SIZES, DEFAULT_VID_SIZE_INDEX, CUSTOM_VID_SIZE_INDEX, resolveVidSize } from "../core/sizes.js";
+import { VIDEO_SIZES, DEFAULT_VID_SIZE_INDEX, CUSTOM_VID_SIZE_INDEX, resolveVidSize, mpToWH } from "../core/sizes.js";
 
 const MODES = [
   { v: "t2v", label: "文生视频（纯文字→视频）T2V" },
@@ -125,6 +125,8 @@ const sel = (list, value) => h("select", { class: "select", style: { width: "aut
   ...list.map((x) => h("option", { value: x, selected: x === value ? "selected" : null }, x)));
 const num = (val, ph, w = 64, step = 1) => h("input", { class: "input", type: "number", step, value: val, placeholder: ph, style: { width: w } });
 
+// MiniMax H3 官方「百万像素」→ 宽高算式统一收在 core/sizes.js 的 mpToWH（与官方 ResolutionSelector 同源）
+
 // 纯文本查看弹窗（用于「预览本镜提示词」）：全内联样式，不依赖外部 CSS 类
 function showTextModal(title, text) {
   const dlg = document.createElement("div");
@@ -170,20 +172,55 @@ export function createTimelinePanel(ctx) {
     if (typeof st.vidH === "number" && st.vidH >= 64 && st.vidH !== P.output.height) P.output.height = st.vidH;
     // H3 官方百万像素（0.1–2）：>0 时后端会按它换算宽高并写进 timeline_data.output.megapixels
     if (typeof st.vidMP === "number" && st.vidMP !== P.output.megapixels) P.output.megapixels = st.vidMP;
+    // H3 官方 output 三开关（与「一键流水线」面板共享 store.exportMode/continuity/audioMute）
+    if (st.exportMode && st.exportMode !== P.output.exportMode) P.output.exportMode = st.exportMode;
+    if (typeof st.continuity === "boolean" && st.continuity !== !!P.output.continuity) P.output.continuity = st.continuity;
+    if (typeof st.continuityOverlap === "number" && st.continuityOverlap !== Number(P.output.continuity_overlap)) P.output.continuity_overlap = st.continuityOverlap;
+    const a = P.audio || (P.audio = {});
+    if (typeof st.audioMute === "boolean" && st.audioMute !== !!a.no_speech) a.no_speech = st.audioMute;
   };
   const _syncStoreFromP = () => {
-    ctx.store.set({ vidW: P.output.width, vidH: P.output.height, vidMP: P.output.megapixels || 0 });
+    ctx.store.set({
+      vidW: P.output.width, vidH: P.output.height, vidMP: P.output.megapixels || 0,
+      exportMode: P.output.exportMode === "segments" ? "segments" : "all",
+      continuity: !!P.output.continuity,
+      continuityOverlap: Number(P.output.continuity_overlap) || 9,
+      audioMute: !!(P.audio && P.audio.no_speech),
+    });
   };
+  // 0) 一次性迁移：老版本这四个开关只存在导演台参数里（P），store 还没有对应键。
+  //    ⚠ 只在 store 仍是默认值、且 P 里确实有用户选择时才灌（否则会把「一键流水线」
+  //      刚写进 store 的开关反向冲回默认 —— 这正是把顺序写反时踩到的坑）。
+  try {
+    if (!localStorage.getItem("mrnext.tl.outflags.migrated")) {
+      const st0 = ctx.store.get();
+      const patch = {};
+      if (st0.exportMode !== "segments" && P.output.exportMode === "segments") patch.exportMode = "segments";
+      if (!st0.continuity && P.output.continuity) {
+        patch.continuity = true;
+        patch.continuityOverlap = Number(P.output.continuity_overlap) || 9;
+      }
+      if (!st0.audioMute && P.audio && P.audio.no_speech) patch.audioMute = true;
+      if (Object.keys(patch).length) ctx.store.set(patch);
+      localStorage.setItem("mrnext.tl.outflags.migrated", "1");
+    }
+  } catch (_) {}
   // 1) 初始化：从 store 读初始值（避免来回切换面板反复覆盖）
   _syncPfromStore();
   // 2) 订阅：其他面板改 store → 这里 P.output.width/height 同步 + 顶部分辨率控件刷新
   ctx.store.subscribe((st) => {
     const ow = P.output.width, oh = P.output.height;
+    const oem = P.output.exportMode, ocon = !!P.output.continuity, oam = !!(P.audio && P.audio.no_speech);
     _syncPfromStore();
     if (P.output.width !== ow || P.output.height !== oh) {
       // 触发了 P.output 改动 → 持久化（_persistent Proxy 的 set 会 save）
       // 再刷新「⚙ 宽×高」按钮的 label
       try { refreshTopVid(); } catch (_) {}
+    }
+    // 导出/连续性/音频模式被「一键流水线」改动 → 同步面板按钮文案与设置页控件
+    if (P.output.exportMode !== oem) { try { refreshExportModeBtn(); } catch (_) {} }
+    if (!!P.output.continuity !== ocon || !!(P.audio && P.audio.no_speech) !== oam) {
+      try { syncOutFlagControls(); } catch (_) {}
     }
   });
   // 把 _syncStoreFromP 暴露给下面的 wIn/hIn oninput 用
@@ -209,6 +246,10 @@ export function createTimelinePanel(ctx) {
   let previewPainter = null;
   // 「声音」页里步数警示的刷新器（改步数/护栏时重绘提示文案）
   let stepsWarnPainter = null;
+  // 「⚙ 采样设置 / 🎙️ 声音」页里 导出模式/连续性/音频模式 三个控件的回填器集合
+  // （被「一键流水线」面板改动 store 时，把新值刷回控件；由设置页构建时注册）
+  const outFlagPainters = new Set();
+  const syncOutFlagControls = () => { outFlagPainters.forEach((f) => { try { f(); } catch (_) {} }); };
 
   const track = h("div", { class: "tl-track" });
   const ruler = h("div", { class: "tl-ruler" });
@@ -365,6 +406,7 @@ export function createTimelinePanel(ctx) {
     control);
   const mkGroup = (key) => {
     const row = h("div", { class: "tl-paramrow" });
+    outFlagPainters.clear();   // 页面重建 → 丢弃上一轮控件的回填器（避免 Set 无限增长 + 悬空 DOM 引用）
     if (!opts) { row.appendChild(h("span", { class: "muted" }, "加载选项…")); return row; }
     if (key === "mode") {
       const msel = h("select", { class: "select", style: { width: "auto" } },
@@ -430,6 +472,30 @@ export function createTimelinePanel(ctx) {
         } else {
           vidWIn.style.display = "none"; vidHIn.style.display = "none";
         }
+      };
+      // H3 官方百万像素（0.1–2）：与工具栏那个 MP 共用 P.output.megapixels，填了就按比例算出宽高
+      const vidMPIn = h("input", {
+        class: "input", type: "number", min: 0.1, max: 2, step: 0.1, placeholder: "MP",
+        style: { width: 58, padding: "4px 5px", fontSize: 11.5 },
+        title: "MiniMax H3 官方百万像素（0.1–2）：填了就按当前比例算宽高并写进工作流（留空=用上面的宽高）",
+      });
+      // 打开设置页时回填已有值（否则永远显示空 → 看不出「已按 N MP 出片」）
+      if (Number(P.output.megapixels) > 0) vidMPIn.value = String(P.output.megapixels);
+      vidMPIn.onchange = () => {
+        const raw = Number(vidMPIn.value);
+        if (!raw || raw <= 0) {
+          P.output.megapixels = 0;
+          ctx.store.set({ vidMP: 0 });
+          vidMPIn.value = "";
+          return;
+        }
+        const mp = Math.max(0.1, Math.min(2, Math.round(raw * 100) / 100));
+        vidMPIn.value = String(mp);
+        const [w, hh] = mpToWH(mp, P.output.width, P.output.height);
+        P.output.megapixels = mp; P.output.width = w; P.output.height = hh;
+        ctx.store.set({ vidMP: mp, vidW: w, vidH: hh, vidSize: CUSTOM_VID_SIZE_INDEX });
+        ctx.toast(`已按 H3 官方 ${mp} MP 设定分辨率：${w}×${hh}（32 对齐）`);
+        renderTrack();
       };
       vidSizeSel.value = String(ctx.store.get().vidSize ?? DEFAULT_VID_SIZE_INDEX);
       syncVidCustom();
@@ -538,10 +604,22 @@ export function createTimelinePanel(ctx) {
       // 官方：段间连续性 continuityEnabled + continuityOverlapFrames（5/9/22/39/56）
       // 以前没暴露也没写进 timeline_data → 官方那套"段间重叠帧"根本没启用
       const contCk = h("input", { type: "checkbox", checked: P.output.continuity ? "checked" : null, style: { accentColor: "#ffd166" } });
-      contCk.onchange = () => { P.output.continuity = contCk.checked; if (contCk.checked && !P.output.continuity_overlap) P.output.continuity_overlap = 9; };
+      contCk.onchange = () => {
+        P.output.continuity = contCk.checked;
+        if (contCk.checked && !P.output.continuity_overlap) P.output.continuity_overlap = 9;
+        if (P.__syncStoreFromP) P.__syncStoreFromP();   // → store.continuity（「一键流水线」联动）
+      };
       const contOvSel = h("select", { class: "select", style: { width: "auto" } },
         ...[5, 9, 22, 39, 56].map((n) => h("option", { value: String(n), selected: Number(P.output.continuity_overlap || 9) === n ? "selected" : null }, String(n) + " 帧")));
-      contOvSel.onchange = () => { P.output.continuity_overlap = Number(contOvSel.value) || 9; };
+      contOvSel.onchange = () => {
+        P.output.continuity_overlap = Number(contOvSel.value) || 9;
+        if (P.__syncStoreFromP) P.__syncStoreFromP();   // → store.continuityOverlap
+      };
+      // 被「一键流水线」改 store → 回填这两个控件
+      outFlagPainters.add(() => {
+        contCk.checked = !!P.output.continuity;
+        contOvSel.value = String(Number(P.output.continuity_overlap) || 9);
+      });
       const sVE = num(P.output.shift_video, "12", 64, 0.1);
       sVE.min = 0.01; sVE.max = 100;
       sVE.oninput = () => { P.output.shift_video = Math.max(0.01, Math.min(100, Number(sVE.value) || 12)); };
@@ -555,6 +633,9 @@ export function createTimelinePanel(ctx) {
         field("采样方案", presetWrap, "采样器+调度器组合预设（点击切换）"),
         field("采样器", samplerE, "sampler"),
         field("调度器", schedE, "scheduler"),
+        field("H3 百万像素", h("div", { class: "row", style: { gap: 6, alignItems: "center" } }, vidMPIn,
+          h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 ResolutionSelector：W=round(aw·√(MP·1024²/(aw·ah))/32)·32" }, "MP（0.1–2，留空=用上面宽高）")),
+          "timeline_data.output.megapixels"),
         // 视频分辨率（与「一键流水线」面板共享 store.vidSize/vidW/vidH）
         h("div", { class: "tl-field", style: { gridColumn: "span 2" } },
           h("div", { class: "tl-flabel" }, "视频分辨率"),
@@ -588,7 +669,15 @@ export function createTimelinePanel(ctx) {
       ambE.oninput = () => { A.ambience = ambE.value; };
       const musE = h("input", { class: "input", value: A.music || "", placeholder: "留空 = N/A（无配乐）", style: { width: "100%" } });
       musE.oninput = () => { A.music = musE.value; };
-      const muteCk = ckBox(() => !!A.no_speech, (v) => { A.no_speech = v; }, "静音模式（完全无人声）", "纯环境音/配乐，不要任何台词与说话声");
+      // 官方 output.audioMode：generate（正常生成人声）/ mute（完全无人声）/ source（保留源音频——仅 v2v 源视频模式用，本节点未接入）
+      const amodeSel = sel(["generate", "mute"], A.no_speech ? "mute" : "generate");
+      amodeSel.onchange = () => {
+        A.no_speech = amodeSel.value === "mute";
+        if (P.__syncStoreFromP) P.__syncStoreFromP();   // → store.audioMute（「一键流水线」联动）
+      };
+      outFlagPainters.add(() => { amodeSel.value = A.no_speech ? "mute" : "generate"; });
+      const amodeWrap = h("div", { class: "row", style: { gap: 6, alignItems: "center" } }, amodeSel,
+        h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 audioMode：generate=正常生成人声；mute=完全无人声（纯环境音/配乐）；source=保留源音频（仅 v2v 源视频模式用，本节点未接入）" }, "generate / mute（source 需源视频，未接入）"));
       const guardCk = ckBox(() => A.guard !== false, (v) => { A.guard = v; }, "低步数音频护栏", "ComfyUI 稳定版在 <8 步时音轨会失真（主仓 bug，修复 commit bdcb886，需 nightly）。开启后自动把步数抬到安全线");
       const minStepE = num(A.min_steps || 8, "8", 56, 1); minStepE.oninput = () => { A.min_steps = Math.max(4, Math.min(32, Number(minStepE.value) || 8)); };
       // 步数低于安全线时的警示（与护栏联动）
@@ -631,7 +720,7 @@ export function createTimelinePanel(ctx) {
         h("div", { class: "tl-field", style: { gridColumn: "span 3" } },
           h("div", { class: "tl-flabel", title: "non_diegetic_music" }, "画外配乐（non_diegetic_music）"),
           musE),
-        muteCk,
+        field("音频模式", amodeWrap, "timeline_data.output.audioMode"),
         guardCk,
         field("护栏最低步数", minStepE, "audio_min_steps"),
         h("div", { class: "tl-field", style: { gridColumn: "span 2" } }, pvBtn),
@@ -1494,14 +1583,6 @@ export function createTimelinePanel(ctx) {
   // MiniMax H3 官方「百万像素」直填（0.1–2）：与官方 ResolutionSelector 同一算式
   //   W = round(aw*√(MP*1024²/(aw*ah))/32)*32   （aw:ah = 当前宽高比）
   // 填了就按它算宽高并真正写进工作流（timeline_data.output.megapixels + mode=fixed）
-  const _mpToWH = (mp, w0, h0) => {
-    const w = Math.max(1, Math.round(Number(w0) || 16)), hh = Math.max(1, Math.round(Number(h0) || 9));
-    const g = (a, b) => (b ? g(b, a % b) : a);
-    const k = g(w, hh) || 1, aw = w / k, ah = hh / k;
-    const v = Math.max(0.1, Math.min(2, Number(mp) || 0));
-    const scale = Math.sqrt((v * 1024 * 1024) / (aw * ah));
-    return [Math.max(32, Math.round((aw * scale) / 32) * 32), Math.max(32, Math.round((ah * scale) / 32) * 32)];
-  };
   const topVidMP = h("input", {
     class: "input", type: "number", min: 0.1, max: 2, step: 0.1, placeholder: "MP",
     style: { width: 58, padding: "4px 5px", fontSize: 11.5 },
@@ -1517,7 +1598,7 @@ export function createTimelinePanel(ctx) {
     }
     const mp = Math.max(0.1, Math.min(2, Math.round(raw * 100) / 100));
     topVidMP.value = String(mp);
-    const [w, hh] = _mpToWH(mp, P.output.width, P.output.height);
+    const [w, hh] = mpToWH(mp, P.output.width, P.output.height);
     P.output.megapixels = mp;
     P.output.width = w; P.output.height = hh;
     ctx.store.set({ vidMP: mp, vidW: w, vidH: hh });
@@ -1656,6 +1737,7 @@ export function createTimelinePanel(ctx) {
     title: "点击切换导出方式：全部导出（自动拼接）/ 分段导出（独立视频）",
     onclick: () => {
       P.output.exportMode = P.output.exportMode === "segments" ? "all" : "segments";
+      if (P.__syncStoreFromP) P.__syncStoreFromP();   // → store.exportMode（「一键流水线」联动）
       refreshExportModeBtn();
       renderAll();
     },

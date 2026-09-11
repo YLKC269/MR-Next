@@ -69,6 +69,11 @@ export function mountApp(shadow, node) {
     vidW: 720,
     vidH: 1280,
     vidMP: 0,     // >0 = 按 MiniMax H3 官方「百万像素」出片（0.1–2），宽高由该值+比例算出
+    // H3 官方 output 三开关（导演台「⚙ 采样设置 / 🎙️ 声音」页 ↔ 一键流水线共享）
+    exportMode: "all",       // all = 整条拼接导出；segments = 每镜独立分段导出
+    continuity: false,       // continuityEnabled：段间用重叠帧衔接
+    continuityOverlap: 9,    // continuityOverlapFrames（5/9/22/39/56）
+    audioMute: false,        // audioMode=mute：完全不要人声（纯环境音/配乐）
     // LoRA（3 个面板联动：生图 / 公共前缀 / 流水线）
     useLora: false,        // 是否启用 LoRA（关闭 = 编辑 LoRA 留空，不影响其他流程）
     loraFolder: "",        // 自定义 LoRA 文件夹（空 = 后端默认 models/loras）
