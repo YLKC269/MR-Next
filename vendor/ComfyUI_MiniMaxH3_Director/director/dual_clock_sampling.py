@@ -128,11 +128,32 @@ def _to_sigma_1d(sigmas) -> Any:
     return torch.tensor([float(x) for x in sigmas], dtype=torch.float32)
 
 
+def _lerp_at(seq, pos: float):
+    """在 sigma 序列上按**归一化位置** pos∈[0, len-1] 线性插值取值。
+
+    用于「音频步数与视频不同」：视频第 step 步对应音频序列上的分数位置
+    ``step/n_steps * (len-1)``，插值后音频累计推进量恰好覆盖整条序列。
+    """
+    n = len(seq) - 1
+    if n <= 0:
+        return seq[0]
+    p = max(0.0, min(float(pos), float(n)))
+    i = int(p)
+    if i >= n:
+        return seq[n]
+    frac = p - i
+    if frac <= 0.0:
+        return seq[i]
+    return seq[i] + (seq[i + 1] - seq[i]) * frac
+
+
 def _latent_video_values(latent) -> tuple[int, int]:
     """从 packed AV latent 解出 (video_values, packed_values)。
 
     官方把 video 与 audio 拼在最后一维；nested 形式则 unbind 成两段。
     video 通道 24 / audio 通道 32 且 audio 的 t 维为 2（官方约定）。
+
+    ⚠ packed 总长 = 各流元素数**之和**（``comfy.utils.pack_latents`` 逐流 reshape 后 cat）。
     """
     import torch
 
@@ -141,17 +162,64 @@ def _latent_video_values(latent) -> tuple[int, int]:
         if len(streams) < 2:
             raise ValueError(f"H3 AV latent 的 nested 流少于 2 段：{len(streams)}")
         video_values = math.prod(streams[0].shape[1:])
-        packed_values = video_values + math.prod(streams[1].shape[1:])
+        packed_values = sum(math.prod(s.shape[1:]) for s in streams)
         return int(video_values), int(packed_values)
 
     shape = tuple(latent.shape)
-    # packed 形式：[..., C_total]；无法从单形状区分时按通道数推断：24 + 32*2
-    if len(shape) >= 2 and int(shape[-1]) in (VIDEO_CHANNELS + AUDIO_CHANNELS * 2,):
-        video_values = VIDEO_CHANNELS
-        return int(video_values), int(shape[-1])
-    # fallback：按 24 + 64 约定
-    log.warning("无法从 latent 形状 %s 明确解出音视频切分，按 24 / 24+64 约定", shape)
-    return VIDEO_CHANNELS, VIDEO_CHANNELS + AUDIO_CHANNELS * 2
+    # packed 形式：[..., C_total]；只有在最后一维**就是通道数**时才敢按通道切。
+    # 真实 H3 packed 的最后一维是元素总数（数万~数百万），不是 88 —— 那种情况必须
+    # 靠 latent_shapes 定切分（见 resolve_dual_clock_split）。
+    if len(shape) >= 2 and int(shape[-1]) == VIDEO_CHANNELS + AUDIO_CHANNELS * 2:
+        return int(VIDEO_CHANNELS), int(shape[-1])
+    raise ValueError(
+        f"无法从 packed latent 形状解出音视频切分：shape={shape}；"
+        "请改用 nested AV latent 或提供 latent_shapes。"
+    )
+
+
+def resolve_dual_clock_split(model_wrap, x, *, video_values: int, packed_values: int):
+    """采样器入口处校正 (video_values, packed_values)。
+
+    为什么要校正：ComfyUI 的 ``ModelPatcher.outer_sample`` 会把 nested AV latent
+    **打包**成 ``[B, 1, C_total]`` 再交给采样器，但切分点只能从 ``inner_model.latent_shapes``
+    （每流原始形状）算出来。构建 KSAMPLER 时拿到的只是「提示值」，若与真实是否一致
+    没人校验 —— 之前就在这儿把 packed 总长算成了「各流形状相乘」，导致采样第一步
+    就抛 "packed latent 在采样器建立后发生改变"。
+
+    这里以 ``x`` 的真实最后一维为准：能对上就沿用；对不上但有 ``latent_shapes``
+    就按它重算；再不行就明确报错（而不是静默出错）。
+    """
+    import math
+
+    total = int(x.shape[-1])
+
+    def _values(shape) -> int:
+        return int(math.prod(tuple(shape)[1:]))
+
+    shapes = None
+    for holder in (model_wrap, getattr(model_wrap, "inner_model", None)):
+        if holder is None:
+            continue
+        cand = getattr(holder, "latent_shapes", None)
+        if cand:
+            shapes = cand
+            break
+
+    if shapes and len(shapes) >= 2:
+        v = _values(shapes[0])
+        total_shapes = sum(_values(s) for s in shapes)
+        if total_shapes == total:
+            return v, total
+
+    if int(packed_values) == total:
+        return int(video_values), total
+
+    raise ValueError(
+        "H3 packed latent 与双时钟切分不一致："
+        f"实际最后一维={total}，构建时 packed_values={int(packed_values)}、"
+        f"video_values={int(video_values)}；latent_shapes={shapes!r}。"
+        "这通常意味着双时钟切分算错了（packed 总长应为各流元素数之和）。"
+    )
 
 
 def sample_dual_clock_euler(
@@ -185,11 +253,11 @@ def sample_dual_clock_euler(
     from comfy.k_diffusion.sampling import to_d
 
     extra_args = {} if extra_args is None else dict(extra_args)
-    if int(x.shape[-1]) != int(packed_values):
-        raise ValueError(
-            "H3 packed latent 在采样器建立后发生改变："
-            f"期望 {packed_values} 个值，实际 {int(x.shape[-1])}"
-        )
+
+    # 以真实 x 为准校正切分（见 resolve_dual_clock_split 的说明）。
+    video_values, packed_values = resolve_dual_clock_split(
+        model, x, video_values=video_values, packed_values=packed_values
+    )
 
     denoise_mask = extra_args.get("denoise_mask")
     audio_mask = None
@@ -219,18 +287,20 @@ def sample_dual_clock_euler(
 
         # ── 音频：在自己的时钟上推进 ──
         if audio_seq is not None:
-            # 音频步数可能与视频不同：把当前进度按比例映射到音频序列的对应区间，
-            # 保证音频始终覆盖它自己的 σ_a: 1→0 全程（不会被视频步数截断）。
-            if n_audio >= n_steps:
-                a_start = int(round(step * n_audio / n_steps))
-                a_end = int(round((step + 1) * n_audio / n_steps))
-            else:
-                a_start = min(step, n_audio - 1)
-                a_end = min(step + 1, n_audio)
-            a_start = max(0, min(a_start, len(audio_seq) - 2))
-            a_end = max(a_start + 1, min(a_end, len(audio_seq) - 1))
-            sigma_a = audio_seq[a_start]
-            sigma_a_next = audio_seq[a_end]
+            # 音频步数常与视频不同（节点默认 steps=25 / steps_audio=8）。
+            # 做法：把「视频进度 step/n_steps」当作音频序列上的**归一化位置**，
+            # 在该位置做线性插值取 σ_a。这样音频累计推进量严格等于它自己的
+            # σ_a 全程（σ_a[0] → σ_a[-1]，即 1→0），既不截断也不超调。
+            #
+            # ⚠ 不要用「索引取整 + 夹住」的写法（min(step, n_audio-1) 或
+            # max(a_start+1, ...)）：前者在音频步数少时会把最后一段 Δσ 反复套用，
+            # 音频累计推进被放大 n_steps/n_audio 倍；后者的强制 +1 会在取整落在
+            # 同一个索引时凭空多推一步。两者都会把音频推出自己的时钟 → 爆音/白噪声。
+            audio_span = len(audio_seq) - 1
+            pos = (step / n_steps) * audio_span if n_steps else 0.0
+            nxt = ((step + 1) / n_steps) * audio_span if n_steps else audio_span
+            sigma_a = _lerp_at(audio_seq, pos)
+            sigma_a_next = _lerp_at(audio_seq, nxt)
             audio_delta = sigma_a_next - sigma_a
         else:
             sigma_a = time_shift_sigma(sigma_v, shift_video, shift_audio)

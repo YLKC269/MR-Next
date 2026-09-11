@@ -12,6 +12,11 @@ from typing import Any, Callable
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core_sampling")
 
+# H3 AV latent 的通道约定（与 dual_clock_sampling 保持一致）：
+# video 24 通道；audio 32 通道且立体声 t 维为 2 → 只在「最后一维就是通道数」时用于回退切分。
+VIDEO_CHANNELS = 24
+AUDIO_CHANNELS = 32
+
 PhaseCallback = Callable[[str, float], None]
 StepPreviewCallback = Callable[[int, int, Any], None]
 
@@ -33,38 +38,70 @@ def _use_basic_guider(cfg: float, negative) -> bool:
     return abs(float(cfg) - 1.0) < 1e-6
 
 
-def _dual_clock_latent_shape(latent) -> tuple[int, int]:
-    """从 packed AV latent 解出 (video_values, packed_values)——双时钟要用它切音视频段。
+def _stream_values(shape) -> int:
+    """一个流的元素数 = prod(shape[1:])（丢掉 batch 维）。"""
+    n = 1
+    for d in tuple(shape)[1:]:
+        n *= int(d)
+    return int(n)
 
-    优先读模型自报的 ``latent_shapes``（官方在采样前会设置），其次按 latent 结构推断。
+
+def _shapes_to_dual_clock(latent_shapes) -> tuple[int, int] | None:
+    """由 ComfyUI 的 ``latent_shapes``（每流的原始形状）算 (video_values, packed_values)。
+
+    ``comfy.utils.pack_latents`` 把每个流 reshape 成 ``[B, 1, prod(shape[1:])]`` 再
+    沿最后一维 cat 起来 —— 所以 packed 总长是各流元素数**相加**，不是相乘。
     """
-    import torch
+    if not latent_shapes or len(latent_shapes) < 2:
+        return None
+    video_values = _stream_values(latent_shapes[0])
+    packed_values = sum(_stream_values(s) for s in latent_shapes)
+    return video_values, packed_values
 
-    # nested 形式：unbind 出 [video, audio, ...]
+
+def _dual_clock_latent_shape(latent, model=None) -> tuple[int, int]:
+    """从 AV latent 解出 (video_values, packed_values)——双时钟要用它切音视频段。
+
+    三种来源，按可靠性排序：
+    1. 模型自报的 ``latent_shapes``（官方 ``inner_sample`` 在采样前设置，
+       ``[video_shape, audio_shape, ...]``）—— 唯一权威来源；
+    2. latent 是 **nested**（``NestedTensor``）→ 直接 unbind 逐流算元素数再相加；
+    3. latent 是 **packed** ``[B, 1, C_total]`` 单张量 —— 无法从形状反推切分点，
+       只有 video/audio 各占一段时可按 H3 通道约定回退（video 24 通道 / audio 32×2）。
+    """
+    # ① 权威：模型在采样前塞进来的 per-stream 形状
+    shapes = None
+    for holder in (model, getattr(model, "inner_model", None)):
+        if holder is None:
+            continue
+        cand = getattr(holder, "latent_shapes", None)
+        if cand:
+            shapes = cand
+            break
+    resolved = _shapes_to_dual_clock(shapes)
+    if resolved is not None:
+        return resolved
+
+    # ② nested：unbind 出 [video, audio, ...]，逐流算元素数再相加
     if hasattr(latent, "is_nested") and latent.is_nested:
         streams = latent.unbind()
-        if len(streams) >= 2:
-            vv = 1
-            for d in streams[0].shape[1:]:
-                vv *= int(d)
-            pv = vv
-            for d in streams[1].shape[1:]:
-                pv *= int(d)
-            return int(vv), int(pv)
+        if len(streams) < 2:
+            raise ValueError(f"H3 AV latent 的 nested 流少于 2 段：{len(streams)}")
+        video_values = _stream_values(streams[0].shape)
+        packed_values = sum(_stream_values(s.shape) for s in streams)
+        return int(video_values), int(packed_values)
 
-    # packed 形式：[..., C_total]
+    # ③ packed 单张量回退：按 H3 通道约定（video 24 / audio 32 且立体声 2）
     shape = tuple(getattr(latent, "shape", ()))
     if len(shape) >= 2:
         total = int(shape[-1])
-        # H3：video 24 通道；audio 32 通道 × 2（立体声）→ 24 + 64 = 88
-        if total == 88:
-            return 24, 88
-        # 其他形状：无法可靠拆分时按 24 通道 video 处理，音频取剩余
-        if total > 24:
-            return 24, total
+        # 形如 [B, N, C] 且最后一维就是通道数时才敢按通道切
+        if total == VIDEO_CHANNELS + AUDIO_CHANNELS * 2:
+            return int(VIDEO_CHANNELS), int(total)
     raise ValueError(
-        f"无法从 AV latent 形状解出双时钟切分：shape={shape}；"
-        "请确认使用的是 H3 原生 AV latent（EmptyMiniMaxH3LatentAV）"
+        f"无法从 AV latent 解出双时钟切分：latent 形状={shape}、"
+        f"latent_shapes={shapes!r}；请确认使用的是 H3 原生 AV latent"
+        "（EmptyMiniMaxH3LatentAV），或从模型传入 latent_shapes。"
     )
 
 
@@ -150,7 +187,7 @@ def sample_single_stage(
             )
             sigma_t = _unpack_node_output(sigma_out)[0]
 
-        video_values, packed_values = _dual_clock_latent_shape(latent)
+        video_values, packed_values = _dual_clock_latent_shape(latent, model_use)
         sampler_obj = build_dual_clock_sampler(
             video_values=video_values,
             packed_values=packed_values,
