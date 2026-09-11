@@ -443,7 +443,7 @@ def _mp_to_wh(mp, w, h, multiple=32):
     return (max(m, int(round((aw * scale) / m) * m)), max(m, int(round((ah * scale) / m) * m)))
 
 
-def _sync_timeline_size(widget, megapixels=None):
+def _sync_timeline_size(widget, megapixels=None, output_flags=None):
     """把 widget 的 width/height/ref_max_size/total_frames 同步进 timeline_data。
 
     Director 实际按 timeline_data.output 的尺寸出图（而非 widget.width/height 顶层值），
@@ -474,6 +474,16 @@ def _sync_timeline_size(widget, megapixels=None):
             try:
                 out["mode"] = "fixed"
                 out["megapixels"] = round(float(megapixels), 3)
+            except (TypeError, ValueError):
+                pass
+        # 官方导出/音频/连续性开关（以前完全没写 → 用户改「分段导出 / 静音 / 段间连续性」在官方侧不生效）
+        for _k, _cast in (("exportMode", str), ("audioMode", str),
+                          ("continuityEnabled", bool), ("continuityOverlapFrames", int)):
+            _v = (output_flags or {}).get(_k)
+            if _v in (None, ""):
+                continue
+            try:
+                out[_k] = _cast(_v)
             except (TypeError, ValueError):
                 pass
         td["output"] = out
@@ -508,7 +518,8 @@ def _deep_replace_num(obj, old_num, new_num):
 
 
 def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
-                     first_frame=None, last_frame=None, refs=None, audios=None, _variant=None,
+                     first_frame=None, last_frame=None, refs=None, audios=None,
+                     ref_by_num=None, audio_by_num=None, _variant=None,
                      steps=None, cfg=None, opts=None):
     """返回 API prompt dict（数字字符串 node id）。
 
@@ -606,7 +617,15 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             opts_obj["width"], opts_obj["height"] = _wh
     # 其它 director 参数/输出尺寸覆盖
     _apply_opts_overrides(widget, opts_obj)
-    _sync_timeline_size(widget, megapixels=_mp)  # 把尺寸 + megapixels 同步进 timeline_data
+    _sync_timeline_size(
+        widget, megapixels=_mp,
+        output_flags={
+            "exportMode": (opts_obj.get("export_mode") or "").lower() or None,
+            "audioMode": ((opts_obj.get("audio_mode") or "").lower() or None),
+            "continuityEnabled": opts_obj.get("continuity"),
+            "continuityOverlapFrames": opts_obj.get("continuity_overlap"),
+        },
+    )  # 尺寸 + megapixels + 导出/音频/连续性开关一起同步进 timeline_data
     if _variant == "no_labels":
         widget = {k: v for k, v in widget.items() if not k.startswith("bd_grp_")}
 
@@ -649,13 +668,52 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
         li_last = None
 
     if mode == "r2v":
-        ref_ids = [load_image(r) for r in (refs or [])[:9] if r]
-        g_ins = {f"ref_images.ref_image_{k}": link(nid) for k, nid in enumerate(ref_ids)}
-        # 音色参考：<Audio N> → ref_audios.ref_audio_{N-1}
-        # （官方组节点输入名，与 ref_images.ref_image_k 同构；H3 最多 3 条参考音频）
-        aud_ids = [add("LoadAudio", {"audio": a}) for a in (audios or [])[:3] if a]
-        if aud_ids:
-            g_ins.update({f"ref_audios.ref_audio_{k}": link(nid) for k, nid in enumerate(aud_ids)})
+        # ⚠ 官方参考槽是**按编号**对应的（vendor/lib/ref_images.py 的 tooltip 原文：
+        #   "Reference image for <Picture {index+1}>"）→ 第 N 号必须落在槽 N-1。
+        # 以前按"列表顺序"接：<Picture 1>/<Picture 3> 会接到槽 0/1，于是"第 3 张"永远没进图
+        # （用户实报：标记了图片/音频参考不作用）。这里改成按编号接。
+        def _sort_num(d):
+            items = []
+            for k, v in (d or {}).items():
+                try:
+                    items.append((int(k), str(v)))
+                except (TypeError, ValueError):
+                    continue
+            return sorted(items)
+
+        g_ins, used_img = {}, set()
+        for n, rel in _sort_num(ref_by_num):
+            if rel and 1 <= n <= 9 and rel not in used_img:
+                g_ins[f"ref_images.ref_image_{n - 1}"] = link(add("LoadImage", {"image": rel}))
+                used_img.add(rel)
+        # 没写编号的（按素材名自动带入的）→ 补到空槽位，不抢占已编号的位置
+        for rel in [r for r in (refs or []) if r and r not in used_img]:
+            k = 0
+            while f"ref_images.ref_image_{k}" in g_ins:
+                k += 1
+            if k > 8:
+                break
+            g_ins[f"ref_images.ref_image_{k}"] = link(add("LoadImage", {"image": rel}))
+            used_img.add(rel)
+        # 兜底：完全没有编号信息（旧前端缓存）→ 维持旧的顺序接法
+        if not g_ins:
+            for k, rel in enumerate([r for r in (refs or [])[:9] if r]):
+                g_ins[f"ref_images.ref_image_{k}"] = link(add("LoadImage", {"image": rel}))
+
+        # 音色参考同理：<Audio N> → ref_audios.ref_audio_{N-1}（官方最多 3 条）
+        used_aud = set()
+        for n, rel in _sort_num(audio_by_num):
+            if rel and 1 <= n <= 3 and rel not in used_aud:
+                g_ins[f"ref_audios.ref_audio_{n - 1}"] = link(add("LoadAudio", {"audio": rel}))
+                used_aud.add(rel)
+        for rel in [a for a in (audios or []) if a and a not in used_aud]:
+            k = 0
+            while f"ref_audios.ref_audio_{k}" in g_ins:
+                k += 1
+            if k > 2:
+                break
+            g_ins[f"ref_audios.ref_audio_{k}"] = link(add("LoadAudio", {"audio": rel}))
+            used_aud.add(rel)
         g_ins["prompt"] = prompt
         g_ins["duration_sec"] = float(seconds)
         grp = add("MiniMaxH3DirectorGroupReferenceToVideo", g_ins)
@@ -693,7 +751,8 @@ def _queue_extra_data(server):
 
 
 async def run_shot(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0,
-                   first_frame=None, last_frame=None, refs=None, audios=None, steps=None, cfg=None,
+                   first_frame=None, last_frame=None, refs=None, audios=None,
+                   ref_by_num=None, audio_by_num=None, steps=None, cfg=None,
                    opts=None, timeout=2400):
     import execution
     from server import PromptServer
@@ -701,7 +760,8 @@ async def run_shot(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.
     server = PromptServer.instance
     graph = build_shot_graph(mode, prompt, seed=seed, seconds=seconds, frame_rate=frame_rate,
                              first_frame=first_frame, last_frame=last_frame, refs=refs,
-                             audios=audios, steps=steps, cfg=cfg, opts=opts)
+                             audios=audios, ref_by_num=ref_by_num, audio_by_num=audio_by_num,
+                             steps=steps, cfg=cfg, opts=opts)
     prompt_id = str(uuid.uuid4())
     number = float(getattr(server, "number", 0))
     server.number = int(number) + 1
@@ -874,7 +934,8 @@ def _collect_video_after_sync(mode, seed, out_dir, before_files):
 
 
 def run_shot_sync(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0,
-                  first_frame=None, last_frame=None, refs=None, audios=None, steps=None, cfg=None,
+                  first_frame=None, last_frame=None, refs=None, audios=None,
+                  ref_by_num=None, audio_by_num=None, steps=None, cfg=None,
                   opts=None, timeout=2400):
     """同步执行 H3 出片（供 MRBoardStudio 节点 execute() 调用）。
 
@@ -888,7 +949,8 @@ def run_shot_sync(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0
     server = PromptServer.instance
     graph = build_shot_graph(mode, prompt, seed=seed, seconds=seconds, frame_rate=frame_rate,
                              first_frame=first_frame, last_frame=last_frame, refs=refs,
-                             audios=audios, steps=steps, cfg=cfg, opts=opts)
+                             audios=audios, ref_by_num=ref_by_num, audio_by_num=audio_by_num,
+                             steps=steps, cfg=cfg, opts=opts)
     prompt_id = "mrnext_sync_" + str(uuid.uuid4().hex)[:8]
 
     out_base = folder_paths.get_output_directory()

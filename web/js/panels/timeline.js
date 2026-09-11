@@ -61,6 +61,8 @@ const DEFAULT_PARAMS = () => ({
     clear_vram: false, export_src: false,
     // 导出模式：all=全部合成一条视频，segments=每镜独立导出（官方导演台同款）
     exportMode: "all",
+    continuity: false,          // 官方 continuityEnabled：段间重叠帧衔接（与「衔接下镜」的提示词级衔接不同）
+    continuity_overlap: 9,      // 官方 continuityOverlapFrames（5/9/22/39/56）
     // 二采高清放大（官方 MiniMaxH3DirectorRefine）
     refine_mode: "off", refine_megapixels: 1.0, refine_passes: 1,
     // 一采二采方案：mode(off/auto/manual) + engine(rtx/flash/seedvr2)
@@ -259,6 +261,10 @@ export function createTimelinePanel(ctx) {
   //   正文里直接写名字        → 收藏库优先、其次素材库文件名（长名优先，避免短名抢匹配）
   const refsFromText = (text) => {
     const out = { image: [], video: [], audio: [] };
+    // 编号映射：官方参考槽是**按编号**对应的（ref_image_{k} ↔ <Picture {k+1}>），
+    // 所以要把「标记里的第 N 号 → rel」单独留一份发给后端，否则 <Picture 1>/<Picture 3>
+    // 会被按列表顺序接到槽 0/1 → 第 3 张永远进不了图（用户实报：标记了参考不作用）。
+    const byNum = { image: {}, video: {}, audio: {} };
     const t = stripVirtualRefs(String(text || ""));
     const push = (kind, rel) => {
       if (!rel || !isUsableRel(rel)) return;
@@ -271,7 +277,9 @@ export function createTimelinePanel(ctx) {
       const kind = tag === "Audio" ? "audio" : tag === "Video" ? "video" : "image";
       const bound = assetRegistry.relOfTag(`<${tag} ${n}>`);
       const f = assetRegistry.fileByIndex(kind, n);
-      push(kind, bound || (f && f.rel) || "");
+      const rel = bound || (f && f.rel) || "";
+      push(kind, rel);
+      if (rel && n >= 1 && isUsableRel(rel) && byNum[kind][n] == null) byNum[kind][n] = rel;
     }
     const names = new Set([
       ...(assetRegistry.favs || []).map((f) => f.name),
@@ -281,6 +289,7 @@ export function createTimelinePanel(ctx) {
       if (!t.includes(nm)) continue;
       push("image", assetRegistry.relOf(nm));
     }
+    out.byNum = byNum;
     return out;
   };
   // 把"正文里看得见的引用"补进本镜素材槽：幂等（只加不删）、每镜只补一次。
@@ -526,6 +535,13 @@ export function createTimelinePanel(ctx) {
       };
       renderQual();
       // 官方：shift_video / shift_audio FLOAT 0.01–100（默认 12 / 3，训练值别乱动）
+      // 官方：段间连续性 continuityEnabled + continuityOverlapFrames（5/9/22/39/56）
+      // 以前没暴露也没写进 timeline_data → 官方那套"段间重叠帧"根本没启用
+      const contCk = h("input", { type: "checkbox", checked: P.output.continuity ? "checked" : null, style: { accentColor: "#ffd166" } });
+      contCk.onchange = () => { P.output.continuity = contCk.checked; if (contCk.checked && !P.output.continuity_overlap) P.output.continuity_overlap = 9; };
+      const contOvSel = h("select", { class: "select", style: { width: "auto" } },
+        ...[5, 9, 22, 39, 56].map((n) => h("option", { value: String(n), selected: Number(P.output.continuity_overlap || 9) === n ? "selected" : null }, String(n) + " 帧")));
+      contOvSel.onchange = () => { P.output.continuity_overlap = Number(contOvSel.value) || 9; };
       const sVE = num(P.output.shift_video, "12", 64, 0.1);
       sVE.min = 0.01; sVE.max = 100;
       sVE.oninput = () => { P.output.shift_video = Math.max(0.01, Math.min(100, Number(sVE.value) || 12)); };
@@ -552,6 +568,9 @@ export function createTimelinePanel(ctx) {
         field("种子", seedE, "seed"),
         field("参考图尺寸", refE, "ref_max_size"),
         field("视频 shift", sVE, "shift_video"),
+        field("段间连续性", h("div", { class: "row", style: { gap: 6, alignItems: "center" } }, contCk,
+          h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 continuityEnabled：段与段之间用重叠帧衔接（与「衔接下镜」的提示词级衔接是两回事）" }, "continuityEnabled"),
+          contOvSel), "continuityEnabled / continuityOverlapFrames"),
         field("音频 shift", sAE, "shift_audio"),
         ck(P.output.clear_vram, (v) => { P.output.clear_vram = v; }, "段间清显存", "clear_vram_between_segments"),
         ck(P.output.export_src, (v) => { P.output.export_src = v; }, "导出源图", "export_source_images"));
@@ -1093,6 +1112,11 @@ export function createTimelinePanel(ctx) {
       lora_name: P.model.lora && P.model.lora !== "(无)" ? P.model.lora : undefined,
       lora_strength: P.model.loraS, width: P.output.width, height: P.output.height,
       megapixels: P.output.megapixels || undefined,   // H3 官方百万像素（0.1–2）→ 后端换算并写进 timeline_data
+      // 官方 timeline_data.output 的导出/音频/连续性开关（以前没传 → 改了也不生效）
+      export_mode: P.output.exportMode === "segments" ? "segments" : "all",
+      audio_mode: (P.audio && P.audio.no_speech) ? "mute" : "generate",
+      continuity: !!(P.output && P.output.continuity),
+      continuity_overlap: P.output && P.output.continuity ? (Number(P.output.continuity_overlap) || 9) : undefined,
       ref_max_size: P.output.ref_size, frame_rate: P.output.fps, steps: P.output.steps,
       cfg: P.output.cfg, shift_video: P.output.shift_video, shift_audio: P.output.shift_audio,
       sampler: P.output.sampler || undefined, scheduler: P.output.scheduler || undefined,
@@ -1309,6 +1333,12 @@ export function createTimelinePanel(ctx) {
     else if (P.mode === "fl2v_tail") payload.last_frame = (frames && frames[0]) || "";
     else if (P.mode === "r2v") {
       payload.refs = imgs;
+      // 官方参考槽按编号：把正文里标记的「第 N 号 → rel」一并发过去，后端放进槽 N-1
+      try {
+        const _bn = refsFromText(c.prompt || (ctx.store.get().shots || [])[i]?.text || "").byNum || {};
+        if (_bn.image && Object.keys(_bn.image).length) payload.refByNum = _bn.image;
+        if (_bn.audio && Object.keys(_bn.audio).length) payload.audioByNum = _bn.audio;
+      } catch (_) { /* 解析失败不影响出片 */ }
       // 音色参考：r2v 组节点有 ref_audios.ref_audio_{k} 输入（官方），把音频小格里的素材一起送过去，
       // 否则「音色参考 <Audio N>」只是句空话（用户实报：音频参考不起作用）
       const auds = ((c.media && c.media.audio) || []).filter(Boolean).slice(0, 3);

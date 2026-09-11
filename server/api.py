@@ -2747,6 +2747,10 @@ async def h3_shot(req):
     # 音色参考（<Audio N>）：r2v 组节点 ref_audios.ref_audio_{k} —— 以前前端没发/后端没接，
     # 用户看到的「音色参考不起作用」= 这条链整段断了
     audios = [x for x in ([_rel(a) for a in (body.get("audio") or [])] if body.get("audio") else []) if x]
+    # 编号映射（官方参考槽按编号：ref_image_{k} ↔ <Picture {k+1}>）——前端把"标记的编号 → rel"发过来，
+    # 后端据此把第 N 号放进槽 N-1；没有它就只能按列表顺序接（标记 <Picture 1>/<Picture 3> 会错位）
+    _ref_by_num = body.get("refByNum") if isinstance(body.get("refByNum"), dict) else None
+    _aud_by_num = body.get("audioByNum") if isinstance(body.get("audioByNum"), dict) else None
     # 幽灵素材过滤：素材被清理后，前端/store 缓存里的 rel 可能还在，这里按磁盘实际存在性剔除，
     # 否则已删除的首帧图/参考图会继续参与构图，污染其它模式的适配生成。
     dropped = []
@@ -2787,12 +2791,29 @@ async def h3_shot(req):
     if mode == "r2v" and not refs:
         return _json({"ok": False, "error": "r2v 模式需要至少一张参考图 refs"}, status=400)
 
+    # 编号映射的存在性过滤（官方参考槽按编号：ref_image_{k} ↔ <Picture {k+1}>）
+    _ref_bn = None
+    if isinstance(_ref_by_num, dict):
+        _ref_bn = {k: v for k, v in _ref_by_num.items() if _media_exists(v)} or None
+    _aud_bn = None
+    if isinstance(_aud_by_num, dict):
+        _aud_bn = {}
+        for _k, _v in _aud_by_num.items():
+            try:
+                if _v and os.path.isfile(os.path.join(_input_base(), str(_v).replace("/", os.sep))):
+                    _aud_bn[_k] = _v
+            except (OSError, ValueError):
+                pass
+        _aud_bn = _aud_bn or None
+
     try:
         path = await h3mod.run_shot(
             mode, prompt, out_dir, seed=seed, seconds=seconds, frame_rate=fr,
             first_frame=first_frame,
             last_frame=last_frame,
             audios=[a for a in audios if _media_exists(a)] or None,
+            ref_by_num=_ref_bn,
+            audio_by_num=_aud_bn,
             refs=refs or None,
             steps=int(steps) if steps not in (None, "") else None,
             cfg=float(cfg) if cfg not in (None, "") else None,
@@ -2878,6 +2899,8 @@ async def h3_dry(req):
     audios_dry = body.get("audio") or []
     # 干跑必须带上 opts（尺寸/步数/百万像素…），否则校验的不是"真正要跑的那张图"
     opts_dry = body.get("opts") if isinstance(body.get("opts"), dict) else None
+    rbn_dry = body.get("refByNum") if isinstance(body.get("refByNum"), dict) else None
+    abn_dry = body.get("audioByNum") if isinstance(body.get("audioByNum"), dict) else None
     server = PromptServer.instance
     try:
         graph = h3mod.build_shot_graph(
@@ -2885,6 +2908,8 @@ async def h3_dry(req):
             first_frame=ff or None, last_frame=lf or None,
             refs=[x for x in refs if x] or None,
             audios=[x for x in audios_dry if x] or None,
+            ref_by_num=rbn_dry,
+            audio_by_num=abn_dry,
             opts=opts_dry,
             _variant=variant or None,
         )
