@@ -62,6 +62,9 @@ export function createPipelinePanel(ctx) {
       speed_lora: speed.lora && speed.lora !== "(无)" ? speed.lora : undefined,
       speed_lora_strength: speed.loraS,
       sage_attention: speed.sage && speed.sage !== "disabled" ? speed.sage : undefined,
+      // 公共提示词（官方 common prompt）—— 与导演台「🌐 公共提示词」页同源
+      common_prompt: (P.common && P.common.text) ? P.common.text : undefined,
+      common_enabled: (P.common && P.common.enabled !== false) ? true : undefined,
       // 声音 / 台词（H3 官方三段式 + 低步数音频护栏）—— 与导演台「🎙️ 声音」页同源
       av_structure: audio.structure === false ? false : true,
       av_lang: audio.lang || "Chinese",

@@ -443,6 +443,43 @@ def _mp_to_wh(mp, w, h, multiple=32):
     return (max(m, int(round((aw * scale) / m) * m)), max(m, int(round((ah * scale) / m) * m)))
 
 
+def concat_common(common, segment):
+    """公共提示词 + 分镜提示词 —— 与官方 director/plan.py concat_common_segment_prompt 同款。
+
+    官方原文：both non-empty → ``common + blank line + segment``；只一侧非空 → 取那一侧。
+    这里复刻同一规则，好让 t2v（单节点，没有 group 可走 commonEnabled 通道）与
+    r2v/i2v/fl2v（走官方 commonEnabled）得到完全一致的最终文本。
+    """
+    c = str(common or "").strip()
+    s = str(segment or "").strip()
+    if c and s:
+        return "%s\n\n%s" % (c, s)
+    return c or s
+
+
+def _sync_common_prompt(widget, common, enabled):
+    """把公共提示词写进官方 timeline_data.global（prompt + commonEnabled）。
+
+    ⚠ commonEnabled 只在**公共提示词非空**时才置 true：
+       官方的 fallback_prompt = global.prompt or 节点 global_prompt，若置 true 但 prompt 为空，
+       会退化成"节点 global_prompt（=本镜提示词）"，再 concat 一次 → 同一段文本出现两遍。
+    """
+    common = str(common or "").strip()
+    try:
+        td = json.loads(str(widget.get("timeline_data") or "{}"))
+    except Exception:  # noqa: BLE001
+        return
+    if not isinstance(td, dict):
+        return
+    g = td.get("global")
+    if not isinstance(g, dict):
+        g = {}
+    g["prompt"] = common
+    g["commonEnabled"] = bool(enabled and common)
+    td["global"] = g
+    widget["timeline_data"] = json.dumps(td, ensure_ascii=False)
+
+
 def _sync_timeline_size(widget, megapixels=None, output_flags=None):
     """把 widget 的 width/height/ref_max_size/total_frames 同步进 timeline_data。
 
@@ -520,6 +557,7 @@ def _deep_replace_num(obj, old_num, new_num):
 def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
                      first_frame=None, last_frame=None, refs=None, audios=None,
                      ref_by_num=None, audio_by_num=None, videos=None, video_by_num=None,
+                     common_prompt=None, common_enabled=None,
                      _variant=None, steps=None, cfg=None, opts=None):
     """返回 API prompt dict（数字字符串 node id）。
 
@@ -531,6 +569,15 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
     speed_pct2/speed_mcs → 模型链末尾插 TESpeedMiniMaxH3 加速节点。
     """
     opts_obj = dict(opts or {})
+    # 公共提示词（官方 common prompt）：没显式给就从 opts 里取（导演台/流水线都塞在 opts）
+    common_prompt = str(common_prompt if common_prompt is not None
+                        else (opts_obj.get("common_prompt") or "")).strip()
+    # ⚠ 显式传进来的 common_enabled 优先：调用方（api.py）已经从 body/opts 解析过一轮，
+    #    这里再让 opts 覆盖回去，会导致"UI 关掉开关但 opts 里还是 true"→ 关不掉。
+    if common_enabled is None:
+        common_enabled = bool(opts_obj.get("common_enabled", True))
+    else:
+        common_enabled = bool(common_enabled)
     # 模式与素材强绑定：t2v 纯文字模式不允许任何图片输入（api.py 已兜底一次，这里再守一次，
     # 防止其它调用方（流水线/外部脚本）绕过 API 直接构图时把参考图带进来）。
     if mode not in _GROUP_MODES:
@@ -631,6 +678,10 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
 
     if mode not in _GROUP_MODES:
         # t2v：单节点 + timeline 替换
+        # 公共提示词：单节点没有 group 可走官方 commonEnabled 通道 → 本节点按官方同款规则拼在最前
+        if common_prompt and common_enabled:
+            prompt = concat_common(common_prompt, prompt)
+            widget["global_prompt"] = prompt
         total = _frame_count(seconds, float(frame_rate))
         widget["total_frames"] = total
         td = json.loads(str(widget.get("timeline_data") or "{}"))
@@ -770,6 +821,10 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             g_ins["last_frame"] = link(li_last)
         grp = add("MiniMaxH3DirectorGroupImageToVideo", g_ins)
 
+    # 公共提示词：外部组模式走官方通道（commonEnabled + global.prompt），官方对每个分段做
+    # concat_common_segment_prompt(公共, 本镜) —— 这才是"逐镜生效"的官方实现方式
+    _sync_common_prompt(widget, common_prompt, common_enabled)
+
     comb = add("MiniMaxH3DirectorGroupsCombine", {"groups.group_0": link(grp)})
     d_ins = {"model": link(u), "video_vae": link(vv), "audio_vae": link(av), "clip": link(c)}
     key = "r2v_groups" if mode == "r2v" else "i2v_groups"
@@ -798,6 +853,7 @@ def _queue_extra_data(server):
 async def run_shot(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0,
                    first_frame=None, last_frame=None, refs=None, audios=None,
                    ref_by_num=None, audio_by_num=None, videos=None, video_by_num=None,
+                   common_prompt=None, common_enabled=None,
                    steps=None, cfg=None, opts=None, timeout=2400):
     import execution
     from server import PromptServer
@@ -807,6 +863,7 @@ async def run_shot(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.
                              first_frame=first_frame, last_frame=last_frame, refs=refs,
                              audios=audios, ref_by_num=ref_by_num, audio_by_num=audio_by_num,
                              videos=videos, video_by_num=video_by_num,
+                             common_prompt=common_prompt, common_enabled=common_enabled,
                              steps=steps, cfg=cfg, opts=opts)
     prompt_id = str(uuid.uuid4())
     number = float(getattr(server, "number", 0))
@@ -982,6 +1039,7 @@ def _collect_video_after_sync(mode, seed, out_dir, before_files):
 def run_shot_sync(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0,
                   first_frame=None, last_frame=None, refs=None, audios=None,
                   ref_by_num=None, audio_by_num=None, videos=None, video_by_num=None,
+                  common_prompt=None, common_enabled=None,
                   steps=None, cfg=None, opts=None, timeout=2400):
     """同步执行 H3 出片（供 MRBoardStudio 节点 execute() 调用）。
 
@@ -997,6 +1055,7 @@ def run_shot_sync(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0
                              first_frame=first_frame, last_frame=last_frame, refs=refs,
                              audios=audios, ref_by_num=ref_by_num, audio_by_num=audio_by_num,
                              videos=videos, video_by_num=video_by_num,
+                             common_prompt=common_prompt, common_enabled=common_enabled,
                              steps=steps, cfg=cfg, opts=opts)
     prompt_id = "mrnext_sync_" + str(uuid.uuid4().hex)[:8]
 

@@ -46,7 +46,7 @@ const IMG_CAP = 9;
 
 const DEFAULT_PARAMS = () => ({
   mode: "t2v",
-  model: { unet: "", clip: "", vvae: "", avae: "", lora: "(无)", loraS: 1 },
+  model: { unet: "", clip: "", vvae: "", avae: "", lora: "(无)", loraS: 1, autoUnet: true },
   speed: { node: "off", dev: "auto", lora: "(无)", loraS: 1, sage: "disabled", free_vram: true,
            // 外部节点接口：external = 画布上检测到的第三方加速类型（非空 → 内置加速自动失效）
            external: [], forceBuiltin: false, extInfo: null },
@@ -70,6 +70,8 @@ const DEFAULT_PARAMS = () => ({
     // 画质档位：draft(低步数·快) / standard(均衡) / final(成品·最佳)
     quality: "standard",
   },
+  // —— 公共提示词（官方导演台 common prompt：整条时间线共用，逐镜并入）——
+  common: { text: "", enabled: true },
   // —— 声音 / 台词（H3 官方三段式提示词）——
   // H3 是音视频联合生成：不写声音字段，模型会自己"补"人声 →「说话乱说」。
   audio: {
@@ -413,6 +415,20 @@ export function createTimelinePanel(ctx) {
   const field = (label, control, officialName) => h("div", { class: "tl-field" },
     h("div", { class: "tl-flabel", title: officialName || "" }, label),
     control);
+  // r2v 是"参考条件"任务：权重必须是 ref2va（官方 r2v 模板）；fl2va 是首尾帧权重，
+  // 拿它跑 r2v 会把 ref_images/ref_videos/ref_audios 当噪声忽略 → 参考一律不生效。
+  const unetIsRefCapable = (n) => /ref2va|hybrid/i.test(String(n || ""));
+  const unetLooksFL2VOnly = (n) => /fl2va/i.test(String(n || "")) && !unetIsRefCapable(n);
+  const refUnetName = () => (opts && ((opts.unetsByMode && opts.unetsByMode.r2v) || opts.refUnet)) || "";
+  // 按模式自动选权重（只在用户没关掉开关时动，且不覆盖用户手动选择过的非等价权重）
+  const applyModeUnet = (mode) => {
+    if (!opts || P.model.autoUnet === false) return "";
+    const want = (opts.unetsByMode && opts.unetsByMode[mode]) || "";
+    if (!want || P.model.unet === want) return "";
+    P.model.unet = want;
+    return want;
+  };
+
   const mkGroup = (key) => {
     const row = h("div", { class: "tl-paramrow" });
     outFlagPainters.clear();   // 页面重建 → 丢弃上一轮控件的回填器（避免 Set 无限增长 + 悬空 DOM 引用）
@@ -423,6 +439,7 @@ export function createTimelinePanel(ctx) {
       // 切换模式要连编辑器一起重渲：t2v 无素材栏，其它模式有（否则要等下次刷新才生效）
       msel.onchange = () => {
         P.mode = msel.value;
+        applyModeUnet(P.mode);   // r2v ↔ 首尾帧：权重跟着模式走（官方两份模板用的 UNET 不同）
         hint.textContent = MODE_HINT[P.mode] || "";
         // 切模式必须清掉"上一个模式的产物预览"：否则在 t2v 里还挂着 r2v 生成的旧视频帧，
         // 用户会以为"文生视频还在拿以前的参考图跑"。
@@ -443,7 +460,47 @@ export function createTimelinePanel(ctx) {
         }, "（官方另有 v2v / rv2v：源视频编辑，本节点暂未接入）"));
     } else if (key === "model") {
       const mkS = (vals, cur) => sel(["", ...(vals || [])], cur || "");
-      const unetE = mkS(opts.unets, P.model.unet); unetE.onchange = () => { P.model.unet = unetE.value; };
+      const unetE = mkS(opts.unets, P.model.unet);
+      const unetWarn = h("div", { class: "muted", style: { gridColumn: "1 / -1", fontSize: "11px", lineHeight: "1.55" } });
+      const paintUnetWarn = () => {
+        const ok = P.mode !== "r2v" || !P.model.unet || unetIsRefCapable(P.model.unet);
+        if (ok) {
+          unetWarn.style.color = "";
+          unetWarn.textContent = P.mode === "r2v"
+            ? `✅ 当前是 r2v（参考生视频），权重 ${P.model.unet || "（未选）"} 支持参考条件`
+            : `当前模式 ${P.mode}：用 fl2va 首尾帧权重即可（r2v 才需要 ref2va）`;
+          return;
+        }
+        unetWarn.style.color = "#ffb4b4";
+        unetWarn.textContent = `⚠ r2v 需要 ref2va（参考）权重，当前选的是「${P.model.unet}」—— fl2va 是首尾帧权重，`
+          + `会把参考图 / 参考视频 / 参考音色当噪声忽略，参考一律不生效。点右边按钮一键切到 ${refUnetName() || "ref2va 权重"}`;
+      };
+      const fixUnetBtn = h("button", {
+        class: "btn", style: { padding: "3px 9px", fontSize: 11.5 },
+        title: "把 UNET 切到官方面向参考任务的 ref2va 权重",
+        onclick: () => {
+          const want = refUnetName();
+          if (!want) { ctx.toast("本机没找到 ref2va 权重，请先下载 minimax_h3_ref2va_pruned_int8_convrot.safetensors", true); return; }
+          P.model.unet = want;
+          renderParam();
+          ctx.toast("已切到 " + want);
+        },
+      }, "🔧 切到 ref2va");
+      const unetFixRow = h("div", { class: "row", style: { gap: 8, alignItems: "center", gridColumn: "1 / -1" } },
+        unetWarn, h("div", { class: "mx-spacer" }), fixUnetBtn);
+      const autoUnetCk = h("input", { type: "checkbox", title: "切换模式时自动选择该模式的官方推荐权重（r2v → ref2va，首尾帧 → fl2va）" });
+      autoUnetCk.checked = P.model.autoUnet !== false;
+      autoUnetCk.onchange = () => {
+        P.model.autoUnet = !!autoUnetCk.checked;
+        if (autoUnetCk.checked) { applyModeUnet(P.mode); renderParam(); }
+      };
+      unetE.onchange = () => {
+        P.model.unet = unetE.value;
+        P.model.autoUnet = false;      // 手动选过就不再自动覆盖
+        if (autoUnetCk.checked) autoUnetCk.checked = false;
+        paintUnetWarn();
+      };
+      paintUnetWarn();
       const clipE = mkS(opts.clips, P.model.clip);
       const vvaeE = mkS(opts.videoVaes, P.model.vvae); vvaeE.onchange = () => { P.model.vvae = vvaeE.value; };
       const avaeE = mkS(opts.audioVaes, P.model.avae); avaeE.onchange = () => { P.model.avae = avaeE.value; };
@@ -461,7 +518,10 @@ export function createTimelinePanel(ctx) {
         clipNote.style.color = t.indexOf("⚠") >= 0 ? "#ffb35c" : (t.indexOf("✓") >= 0 ? "#8ff0c0" : "#7d9dba");
       };
       clipE.onchange = () => { P.model.clip = clipE.value; syncClipNote(); };
-      row.append(field("UNet 模型", unetE, "model"), field("CLIP 文本编码", clipE, "clip"),
+      row.append(unetFixRow,
+        h("div", { class: "row", style: { gap: 8, alignItems: "center" } }, autoUnetCk,
+          h("span", { class: "muted", style: { fontSize: 11 } }, "跟随模式自动选权重（推荐：r2v → ref2va，首尾帧 → fl2va）")),
+        field("UNet 模型", unetE, "model"), field("CLIP 文本编码", clipE, "clip"),
         field("视频 VAE", vvaeE, "video_vae"), field("音频 VAE", avaeE, "audio_vae"),
         field("LoRA", loraE, "lora_name"), field("LoRA 强度", loraSE, "lora_strength"), clipNote);
       syncClipNote();
@@ -854,6 +914,53 @@ export function createTimelinePanel(ctx) {
         field("蒸馏 LoRA", accLoraE, "speed_lora"),
         field("蒸馏 LoRA 强度", accLoraSE, "speed_lora_strength"),
         freeCk);
+    } else if (key === "common") {
+      // 公共提示词（对齐官方导演台 common prompt）：
+      //   官方 external_groups 在 commonEnabled=true 时对每个分段做
+      //   concat_common_segment_prompt(公共提示词, 本镜提示词) = 公共 + 空行 + 本镜
+      //   → 写一次，整条时间线所有分镜（含「出片选中」与流水线）逐镜生效。
+      const ta = h("textarea", {
+        class: "input", rows: 4,
+        style: { width: "100%", minHeight: 82, resize: "vertical", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" },
+        placeholder: "例：3D CG 皮克斯卡通渲染，Q 版比例，9:16 竖屏，暖灯笼光；全程无画面字幕。\n"
+          + "（这段会拼在每个分镜提示词的最前面 → 全局统一风格/规则，不用每镜重复写）",
+      });
+      ta.value = (P.common && P.common.text) || "";
+      const cnt = h("span", { class: "muted", style: { fontSize: 11 } });
+      const paintCnt = () => { cnt.textContent = `${((P.common && P.common.text) || "").length} 字`; };
+      ta.oninput = () => { P.common.text = ta.value; paintCnt(); };
+      paintCnt();
+      const ck = h("input", { type: "checkbox", title: "官方 commonEnabled：关掉则本段只在编辑区留档，不并入分镜" });
+      ck.checked = !(P.common && P.common.enabled === false);
+      const lbl = h("span", { class: "muted", style: { fontSize: 11 } }, "并入每个分镜（官方 commonEnabled）");
+      ck.onchange = () => { P.common.enabled = !!ck.checked; };
+      const pvBtn = h("button", {
+        class: "btn", style: { padding: "4px 10px", fontSize: 11.5 },
+        title: "用当前选中分镜演示「公共提示词 + 本镜」合并后的最终提示词",
+        onclick: async () => {
+          const shots = ctx.store.get().shots || [];
+          const i = (selIdx >= 0 && selIdx < shots.length) ? selIdx : 0;
+          const raw = stripVirtualRefs(shot(i).prompt || (shots[i] && shots[i].text) || "");
+          pvBtn.disabled = true; pvBtn.textContent = "合并中…";
+          try {
+            const r = await ctx.api.h3PromptPreview({
+              prompt: raw, prefix: stripVirtualRefs(ctx.store.get().prefix || ""),
+              seconds: effSec(i), index: (shots[i] && shots[i].index) || i + 1, opts: collectOpts(),
+            });
+            if (!r.ok) { ctx.toast("预览失败: " + (r.error || ""), true); return; }
+            showTextModal(`公共提示词合并预览 · 第 ${(shots[i] && shots[i].index) || i + 1} 镜`, r.prompt || "");
+          } catch (e) { ctx.toast("预览失败: " + e.message, true); }
+          finally { pvBtn.disabled = false; pvBtn.textContent = "🔍 预览合并效果"; }
+        },
+      }, "🔍 预览合并效果");
+      row.append(h("div", { class: "tl-field", style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 } },
+        h("div", { class: "row", style: { gap: 8, alignItems: "center", flexWrap: "wrap" } },
+          h("div", { class: "tl-flabel", title: "全局 · 每个分镜共用（官方 common prompt）" }, "公共提示词（全局 · 整条时间线共用）"),
+          cnt, h("div", { class: "mx-spacer" }), ck, lbl, pvBtn),
+        ta,
+        h("div", { class: "muted", style: { fontSize: 10.5, lineHeight: 1.55 } },
+          "合并规则（官方同款）：公共提示词 + 空行 + 本镜提示词。r2v/i2v/fl2v 由官方 commonEnabled 逐镜生效，"
+          + "t2v 由本节点按同一规则拼接；「出片选中」与流水线也会带上它。")));
     }
     return row;
   };
@@ -863,6 +970,7 @@ export function createTimelinePanel(ctx) {
     { key: "model", label: "🧠 模型" },
     { key: "sample", label: "📐 采样设置" },
     { key: "audio", label: "🎙️ 声音" },
+    { key: "common", label: "🌐 公共提示词" },
     { key: "speed", label: "⚡ 加速" },
   ];
   const renderParam = () => {
@@ -1330,6 +1438,10 @@ export function createTimelinePanel(ctx) {
       // 外部节点接口：非空 = 画布上外接了第三方加速 → 后端让内置加速失效（双保险）
       external_accel: (P.speed.external && P.speed.external.length) ? P.speed.external : undefined,
       force_builtin_accel: P.speed.forceBuiltin ? true : undefined,
+      // —— 公共提示词（官方 common prompt）——
+      // 放进 opts：导演台单镜/出片选中/干跑 都会自动带上；流水线另有同源读取
+      common_prompt: (P.common && P.common.text) ? P.common.text : undefined,
+      common_enabled: (P.common && P.common.enabled !== false) ? true : undefined,
       // —— 声音 / 台词（H3 官方三段式）——
       av_structure: P.audio && P.audio.structure === false ? false : true,
       av_lang: (P.audio && P.audio.lang) || "Chinese",
@@ -1545,18 +1657,22 @@ export function createTimelinePanel(ctx) {
       const vids = ((c.media && c.media.video) || []).filter(Boolean).slice(0, 3);
       if (vids.length) payload.video = vids;
     }
+    // ⚠ 日志栏是单行（println = logFull.textContent = t，后写覆盖前面的）：
+    //    所以期间的告警先收集起来，最后与「▶ 第N镜」合并成**一条**输出 —— 否则会被状态行覆盖，
+    //    用户根本看不到（"标了参考不生效"的提示就白打了）。
+    const _warns = [];
     // 音色参考回执：官方只在「参考生视频(R2V)」有 ref_audios.ref_audio_{N-1} 槽位。
     // 别的模式标了 <Audio N> 也发不出去 → 必须明说，否则用户以为"标了就生效"（用户实报）。
     try {
       const _tags = [...new Set([...String(text).matchAll(/<\s*Audio\s*(\d+)\s*>/gi)]
         .map((m) => parseInt(m[1], 10)).filter((n) => n > 0))].sort((a, b) => a - b);
       if (_tags.length && P.mode !== "r2v") {
-        println(`⚠ 本镜标了 <Audio ${_tags.join("> <Audio ")}> 音色参考，但当前是「${modeLabel(P.mode)}」模式 —— 官方只有「参考生视频(R2V)」支持音色参考，切到 R2V 才会生效`, "#ffb35c");
+        _warns.push(`本镜标了 <Audio ${_tags.join("> <Audio ")}> 音色参考，但当前是「${modeLabel(P.mode)}」模式 —— 官方只有「参考生视频(R2V)」支持音色参考，切到 R2V 才会生效`);
       } else if (_tags.length) {
         const _au = ((c.media && c.media.audio) || []).filter(Boolean);
         const _miss = _tags.filter((n) => !_au[n - 1]);
         if (_miss.length) {
-          println(`⚠ <Audio ${_miss.join("> <Audio ")}> 找不到对应音频（本镜音频槽只有 ${_au.length} 条，最多 3 条）→ 这几条音色参考不会生效；请在正文里改用 @音频名 或点音频格第 ${_miss[0]} 格上传`, "#ffb35c");
+          _warns.push(`<Audio ${_miss.join("> <Audio ")}> 找不到对应音频（本镜音频槽只有 ${_au.length} 条，最多 3 条）→ 这几条音色参考不会生效；请在正文里改用 @音频名 或点音频格第 ${_miss[0]} 格上传`);
         }
       }
       // 参考视频回执：官方只在 R2V 有 ref_videos.ref_video_{k} 槽位
@@ -1565,11 +1681,11 @@ export function createTimelinePanel(ctx) {
       if (_vtags.length) {
         const _vv = ((c.media && c.media.video) || []).filter(Boolean);
         if (P.mode !== "r2v") {
-          println(`⚠ 本镜标了 <Video ${_vtags.join("> <Video ")}> 参考视频，但当前是「${modeLabel(P.mode)}」模式 —— 官方只有「参考生视频(R2V)」支持参考视频，切到 R2V 才会生效`, "#ffb35c");
+          _warns.push(`本镜标了 <Video ${_vtags.join("> <Video ")}> 参考视频，但当前是「${modeLabel(P.mode)}」模式 —— 官方只有「参考生视频(R2V)」支持参考视频，切到 R2V 才会生效`);
         } else {
           const _vmiss = _vtags.filter((n) => !_vv[n - 1]);
           if (_vmiss.length) {
-            println(`⚠ <Video ${_vmiss.join("> <Video ")}> 找不到对应视频（本镜视频槽只有 ${_vv.length} 条）→ 请在「视频」格里上传，或点该格从素材库选`, "#ffb35c");
+            _warns.push(`<Video ${_vmiss.join("> <Video ")}> 找不到对应视频（本镜视频槽只有 ${_vv.length} 条）→ 请在「视频」格里上传，或点该格从素材库选`);
           }
         }
       }
@@ -1588,13 +1704,22 @@ export function createTimelinePanel(ctx) {
         if (_extra.length) {
           const _msg = "ℹ 有 " + _extra.join(" / ") + "没在正文里标编号 —— 已作为额外参考一起送进导演台"
             + "（想精确控制就写 <Picture N>/<Video N>/<Audio N>）";
-          println(_msg, "#9fb6d0");
+          _warns.push(_msg);
         }
       }
     } catch (_) { /* 回执失败不影响出片 */ }
+    // 权重回执：r2v 必须 ref2va。权重不对时参考全部失效——这是"标了参考不生效"最常见的环境原因。
+    try {
+      if (P.mode === "r2v" && P.model.unet && !unetIsRefCapable(P.model.unet)) {
+        _warns.push("当前 r2v 用的是「" + P.model.unet + "」—— 不是 ref2va（参考）权重。"
+          + "fl2va 是首尾帧权重，会把参考图 / 参考音色当噪声忽略，标了也不生效 → "
+          + "去「🧠 模型」页一键切到 " + (refUnetName() || "ref2va 权重") + " 再重跑本镜");
+      }
+    } catch (_) {}
     println(`▶ 第${sh.index}镜（${modeLabel(P.mode)} · ${sec}s · ${isFramesMode
       ? `首帧${(frames && frames[0]) ? "✓" : "✗"} 尾帧${(frames && frames[1]) ? "✓" : "✗"}`
-      : `图${imgs.length} 视${c.media.video.length} 音${c.media.audio.length}`}${(!isFramesMode && !imgs.length) ? " · 无素材(纯文本)" : ""}）`, "#9fd0ff");
+      : `图${imgs.length} 视${c.media.video.length} 音${c.media.audio.length}`}${(!isFramesMode && !imgs.length) ? " · 无素材(纯文本)" : ""}）`
+      + (_warns.length ? ` ｜ ⚠ ${_warns.join(" ｜ ⚠ ")}` : ""), _warns.length ? "#ffb35c" : "#9fd0ff");
     // 生成中实时预览：低频轮询采样 preview 图（不占资源）
     // 关键：带本次起始时间戳，只认"本次开始之后写盘"的预览图 —— 否则会把上一轮（甚至别的
     // 模式 / 别的镜）留在预览目录里的旧图当成"本次实时预览"显示，看起来就像"还在用以前的参考图"。
@@ -2137,6 +2262,10 @@ export function createTimelinePanel(ctx) {
     if (opts && opts.defaults) {
       const d = opts.defaults;
       if (!P.model.unet && d.unet) P.model.unet = d.unet;
+      if (P.model.autoUnet !== false && opts.unetsByMode) {
+        const want = opts.unetsByMode[P.mode] || opts.unetsByMode.i2v || "";
+        if (want) P.model.unet = want;   // 打开面板就按当前模式对齐权重（r2v → ref2va）
+      }
       if (!P.model.clip && d.clip) P.model.clip = d.clip;
       if (!P.model.vvae && d.video_vae) P.model.vvae = d.video_vae;
       if (!P.model.avae && d.audio_vae) P.model.avae = d.audio_vae;

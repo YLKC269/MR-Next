@@ -1,11 +1,63 @@
 # MR分镜助手导演台 · Next — 安装流程与使用教程
 
-> 版本：**v1.11.5** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
+> 版本：**v1.11.6** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
 >
 > 官方 MiniMax H3 出片引擎已内嵌在包内，**不需要另外安装任何节点**（VOSR2 / SeedVR2 是可选增强，装了才启用）。
 
 <details open>
-<summary><b>本次更新 · v1.11.5（点开看变化）</b></summary>
+<summary><b>本次更新 · v1.11.6（点开看变化）</b></summary>
+
+**① 参考不生效的真凶找到了：r2v 用错权重（fl2va ≠ ref2va）**
+
+官方两份模板用的 UNET **不是同一个**：
+
+| 官方模板 | UNET |
+|---|---|
+| `minimax_h3_director_r2v.json`（参考生视频） | `minimax_h3_ref2va_pruned_int8_convrot.safetensors` |
+| `minimax_h3_director_fl2v.json`（首尾帧） | `minimax_h3_fl2va_pruned_int8_convrot.safetensors` |
+
+而本节点原来的默认权重挑选顺序是 `fl2va → ref2va`，**r2v 永远拿到 fl2va**。
+fl2va 是「首尾帧」微调，没有被训练过参考条件 → `ref_images` / `ref_videos` / `ref_audios`
+会被当噪声**忽略**。这解释了一个反复出现的现象：构图里参考全都连上了、提示词也标了，
+出片却完全不参考 —— **因为权重根本不是参考任务的那份**。
+
+现在：
+- 后端按模式给推荐权重（`unetsByMode`：r2v → ref2va，其余 → fl2va）
+- 模型页新增「**跟随模式自动选权重（推荐）**」：切换模式自动换权重（升级前的旧配置会被自动纠正）
+- r2v + 非 ref2va 权重时，模型页给**红色告警**并附「🔧 切到 ref2va」一键修复；出片时也会提示
+- 手动选过权重即关闭自动跟随（不覆盖用户选择）
+
+**② 新增「🌐 公共提示词」（对齐官方导演台 common prompt）**
+
+- 导演台参数区新增一页：一段文字 + 「并入每个分镜（官方 `commonEnabled`）」开关 + 合并预览
+- 合并规则与官方 `concat_common_segment_prompt` 完全一致：**公共提示词 + 空行 + 本镜提示词**
+- 落地方式也照官方：r2v/i2v/fl2v 写进官方 `timeline_data.global.prompt` + `commonEnabled=true`，
+  由官方引擎逐镜拼接；t2v 单节点没有 group，由本节点按同一规则拼接
+- **公共提示词为空时绝不打开 commonEnabled** —— 否则官方会把「本镜提示词」拼两遍
+- 「出片选中」与一键流水线都会带上它（同一个参数源）
+
+**③ 顺手修：之前的告警其实用户看不到**
+
+日志栏是**单行**（`logFull.textContent = t`，后写覆盖前面的），而我上一版把
+「音色/视频标记找不到素材」「额外参考」「权重不对」等提示打在了 `▶ 第N镜` **之前** →
+**全被状态行覆盖**，等于白打。现在统一收集后与状态行合并成一条输出：
+
+```
+▶ 第1镜（参考生视频(R2V) · 5s · 图1 视0 音0） ｜ ⚠ <Audio 1> 找不到对应音频… ｜ ⚠ 当前 r2v 用的是「fl2va」…
+```
+
+**校验（真机）**：新增 `common_prompt_e2e` **18 项** 与 `ref_unet_e2e` **14 项**；
+回归 media_slots 39 / full_slots 17 / voice_payload 16 / ui_fit 21 / align_refs 14 /
+refs_autofill 12 / timeline_refs 13 / frames 17 / assets_nodupe 11 / prod_tpl 18 / shotfmt 25 /
+final 26 / outflags 30 / t_split 6 / t_shotfmt 19 / t_prodtpl 32 / t_frames 8 / t_external 21 /
+t_voice 22 / t_prodtpl_api 72 **全绿（0 失败）**。
+
+**仍未接入（如实列出）**：`v2v / rv2v / mixed` 三种 task_type、`sigmas` 外接噪声表。
+
+</details>
+
+<details>
+<summary><b>v1.11.5（点开看变化）</b></summary>
 
 **槽位恢复固定 图片 9 / 视频 3 / 音频 3 —— 而且每一格都可用、都真的送进导演台**
 

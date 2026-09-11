@@ -2796,6 +2796,13 @@ async def h3_shot(req):
     _ref_by_num = body.get("refByNum") if isinstance(body.get("refByNum"), dict) else None
     _aud_by_num = body.get("audioByNum") if isinstance(body.get("audioByNum"), dict) else None
     _vid_by_num = body.get("videoByNum") if isinstance(body.get("videoByNum"), dict) else None
+    # 公共提示词（官方 common prompt）：显式字段优先，否则用 opts 里的（导演台/流水线同源）
+    _opts_common = body.get("opts") if isinstance(body.get("opts"), dict) else {}
+    common_prompt = str(body.get("common_prompt") or _opts_common.get("common_prompt") or "").strip()
+    common_enabled = body.get("common_enabled")
+    if common_enabled is None:
+        common_enabled = _opts_common.get("common_enabled", True)
+    common_enabled = bool(common_enabled)
     # 幽灵素材过滤：素材被清理后，前端/store 缓存里的 rel 可能还在，这里按磁盘实际存在性剔除，
     # 否则已删除的首帧图/参考图会继续参与构图，污染其它模式的适配生成。
     dropped = []
@@ -2861,6 +2868,8 @@ async def h3_shot(req):
             last_frame=last_frame,
             audios=[a for a in audios if _media_exists(a)] or None,
             videos=[v for v in videos if _media_exists(v)] or None,
+            common_prompt=common_prompt or None,
+            common_enabled=common_enabled,
             ref_by_num=_ref_bn,
             audio_by_num=_aud_bn,
             video_by_num=_vid_bn,
@@ -2928,6 +2937,13 @@ async def h3_prompt_preview(req):
                                        shot_no=idx, seconds=sec)
     except Exception as exc:  # noqa: BLE001
         return _json({"ok": False, "error": str(exc)}, status=500)
+    # 公共提示词（官方 common prompt）：与官方 concat_common_segment_prompt 同款 —— 公共 + 空行 + 本镜
+    _common = str(body.get("common_prompt") or o.get("common_prompt") or "").strip()
+    _cen = body.get("common_enabled")
+    if _cen is None:
+        _cen = o.get("common_enabled", True)
+    if _common and bool(_cen):
+        out = h3mod.concat_common(_common, out)
     return _json({"ok": True, "prompt": out,
                   "roles": h3pmod.extract_role_names(prefix),
                   # 把说话人编号与音色编号一并回显：前端「预览提示词」能直接核对
@@ -2958,6 +2974,11 @@ async def h3_dry(req):
     rbn_dry = body.get("refByNum") if isinstance(body.get("refByNum"), dict) else None
     abn_dry = body.get("audioByNum") if isinstance(body.get("audioByNum"), dict) else None
     vbn_dry = body.get("videoByNum") if isinstance(body.get("videoByNum"), dict) else None
+    _opts_dry = body.get("opts") if isinstance(body.get("opts"), dict) else {}
+    common_dry = str(body.get("common_prompt") or _opts_dry.get("common_prompt") or "").strip()
+    cen_dry = body.get("common_enabled")
+    if cen_dry is None:
+        cen_dry = _opts_dry.get("common_enabled", True)
     server = PromptServer.instance
     try:
         graph = h3mod.build_shot_graph(
@@ -2966,6 +2987,8 @@ async def h3_dry(req):
             refs=[x for x in refs if x] or None,
             audios=[x for x in audios_dry if x] or None,
             videos=[x for x in videos_dry if x] or None,
+            common_prompt=common_dry or None,
+            common_enabled=bool(cen_dry),
             ref_by_num=rbn_dry,
             audio_by_num=abn_dry,
             video_by_num=vbn_dry,
@@ -3532,8 +3555,23 @@ async def editor_options(req):
     # 推荐默认模型（本机实际存在的官方模板组合，打开即用）
     # CLIP 优先挑 int8：nvfp4/fp4 这类 4bit 量化虽然省内存，但语义会打折，
     # 表现就是「画面不按提示词走」——默认不给它。
+    # ⚠ 官方两份模板用的 UNET 是**不一样**的：
+    #     fl2v（首尾帧）模板 → minimax_h3_fl2va_*；r2v（参考）模板 → minimax_h3_ref2va_*。
+    #     fl2va 没学过"参考条件"，拿它跑 r2v 时 ref_images/ref_videos/ref_audios 会被当噪声忽略
+    #     —— 表现就是"参考图/音色标了也不生效"（用户反复实报的根因之一）。
+    _ref_unet = _pick(unets, ["ref2va_pruned_int8_convrot", "ref2va_pruned_int8", "ref2va"])
+    _fl2v_unet = _pick(unets, ["fl2va_pruned_int8_convrot", "fl2va_pruned_int8", "fl2va"])
+    _hybrid_unet = _pick(unets, ["hybrid_fl2va_ref2va", "hybrid"])
+    unets_by_mode = {
+        "t2v": _fl2v_unet or _hybrid_unet or _ref_unet,
+        "i2v": _fl2v_unet or _hybrid_unet or _ref_unet,
+        "fl2v": _fl2v_unet or _hybrid_unet or _ref_unet,
+        "fl2v_tail": _fl2v_unet or _hybrid_unet or _ref_unet,
+        # r2v 是参考任务：优先 ref2va；没有 ref2va 才退回 hybrid / fl2va（并会在前端提示）
+        "r2v": _ref_unet or _hybrid_unet or _fl2v_unet,
+    }
     defaults = {
-        "unet": _pick(unets, ["fl2va_pruned_int8", "fl2va", "ref2va_pruned_int8", "ref2va"]),
+        "unet": _fl2v_unet or _ref_unet,
         "clip": _pick(clips, ["qwen3vl_32b_minimax_h3_int8", "qwen3vl_32b_int8", "qwen3vl_32b", "qwen3vl"]),
         "video_vae": _pick(vvaes, ["video_vae_fp16", "video"]),
         "audio_vae": _pick(avaes, ["audio_vae_fp32", "audio"]),
@@ -3545,6 +3583,8 @@ async def editor_options(req):
         "loraEnabled": enabled,
         "loraExtra": extra,
         "defaults": defaults,
+        "unetsByMode": unets_by_mode,     # 按模式切换的推荐权重（r2v → ref2va）
+        "refUnet": _ref_unet, "fl2vUnet": _fl2v_unet, "hybridUnet": _hybrid_unet,
         "aspects": [
             # 官方 MiniMax H3 分辨率档位（短边 768，multiple=32，megapixel 对齐）
             # 16:9 横版（480×270 → 1920×1088）
