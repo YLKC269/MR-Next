@@ -69,6 +69,7 @@ export function mountApp(shadow, node) {
     vidW: 720,
     vidH: 1280,
     vidMP: 0,     // >0 = 按 MiniMax H3 官方「百万像素」出片（0.1–2），宽高由该值+比例算出
+    vidOrient: "auto", // MP 出片的朝向：auto（沿用当前比例）/ portrait（竖屏 h>w）/ landscape（横屏 w>h）
     // H3 官方 output 三开关（导演台「⚙ 采样设置 / 🎙️ 声音」页 ↔ 一键流水线共享）
     exportMode: "all",       // all = 整条拼接导出；segments = 每镜独立分段导出
     continuity: false,       // continuityEnabled：段间用重叠帧衔接

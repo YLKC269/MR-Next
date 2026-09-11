@@ -76,15 +76,58 @@ export const CUSTOM_VID_SIZE_INDEX = VIDEO_SIZES.length - 1;
 // MiniMax H3 官方「百万像素」→ 宽高（与官方 ResolutionSelector 同一算式：
 //   vendor/ComfyUI_MiniMaxH3_Director/director/refine_pack.py::resolution_from_selector）
 //   W = round(aw·√(MP·1024²/(aw·ah))/32)·32   （aw:ah = 当前宽高比；MP 官方钳 0.1–2）
+//
+// orient（朝向）控制"长边落在哪一侧"，让用户能自选横屏/竖屏（不必先去挑档位）：
+//   "auto"（默认，兼容旧行为）：沿用 w0:h0 的原始朝向，只按 MP 缩放；
+//   "portrait"（竖屏）：把当前的宽高比取倒数（需要时）→ 结果 h > w；
+//   "landscape"（横屏）：结果 w > h。
+// 实现：先以「比例」算出基准尺寸，再按朝向决定是否取倒数重算 —— 只动宽高比、不动像素规模，
+// 因此无论当前是横还是竖，都能一键切到目标朝向且总像素数（MP）保持不变。
 // 采样设置页 / 工具栏 / 一键流水线 三处共用，改一处即全对。
-export const mpToWH = (mp, w0, h0) => {
+export const mpToWH = (mp, w0, h0, orient) => {
   const w = Math.max(1, Math.round(Number(w0) || 16)), hh = Math.max(1, Math.round(Number(h0) || 9));
+  let aw = w, ah = hh;
+  const mode = orient || "auto";
+  if (mode === "portrait" && aw > ah) { const t = aw; aw = ah; ah = t; }      // 强制竖：高 ≥ 宽
+  if (mode === "landscape" && ah > aw) { const t = aw; aw = ah; ah = t; }    // 强制横：宽 ≥ 高
   const g = (a, b) => (b ? g(b, a % b) : a);
-  const k = g(w, hh) || 1, aw = w / k, ah = hh / k;
+  const k = g(aw, ah) || 1;
+  const rw = aw / k, rh = ah / k;
   const v = Math.max(0.1, Math.min(2, Number(mp) || 0));
-  const scale = Math.sqrt((v * 1024 * 1024) / (aw * ah));
-  return [Math.max(32, Math.round((aw * scale) / 32) * 32), Math.max(32, Math.round((ah * scale) / 32) * 32)];
+  const scale = Math.sqrt((v * 1024 * 1024) / (rw * rh));
+  const snap = (x) => Math.max(32, Math.round(x / 32) * 32);
+  const ow = snap(rw * scale), oh = snap(rh * scale);
+  // 32 对齐后若朝向被破坏（极窄比例 + 小 MP 时可能发生），交换修正
+  if (mode === "portrait" && ow > oh) return [oh, ow];
+  if (mode === "landscape" && oh > ow) return [oh, ow];
+  return [ow, oh];
 };
+
+// 按朝向挑档位（用于「分辨率」下拉里"跟着朝向自动选一个档位"）：
+//   portrait → 9:16 竖屏档；landscape → 16:9 横屏档；square 保持 1:1。
+// 只在当前档位朝向与目标不一致时才换，尽量沿用用户已选的比例（如 4:3）。
+export function orientVidIndex(index, orient) {
+  const i = Number(index) || 0;
+  const want = orient === "landscape" ? "l" : orient === "portrait" ? "p" : null;
+  if (!want) return i;
+  const row = VIDEO_SIZES[i];
+  if (!row) return i;
+  const [, w, h] = row;
+  if (!w || !h) return i;                       // 自定义档不动
+  const isP = h > w, isL = w > h;
+  if ((want === "p" && isP) || (want === "l" && isL)) return i;   // 已经对了
+  if (w === h) {                                 // 1:1 → 按朝向给一个 16:9 / 9:16
+    return want === "p" ? DEFAULT_VID_SIZE_INDEX : 5;
+  }
+  // 保住比例族：优先同一"像素规模"的镜像档（9:16 ↔ 16:9）
+  const area = w * h;
+  const cand = VIDEO_SIZES
+    .map(([label, cw, ch], ci) => ({ ci, cw, ch, label }))
+    .filter((c) => c.cw && c.ch && ((want === "p" && c.ch > c.cw) || (want === "l" && c.cw > c.ch)));
+  if (!cand.length) return i;
+  cand.sort((a, b) => Math.abs(a.cw * a.ch - area) - Math.abs(b.cw * b.ch - area));
+  return cand[0].ci;
+}
 
 export function resolveVidSize(index, customW, customH) {
   const i = Number(index) || 0;
