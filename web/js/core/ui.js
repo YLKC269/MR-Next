@@ -1,5 +1,45 @@
 // core/ui.js — 跨面板共享的小 UI 助手：媒体灯箱 / 分类计数 tab / 素材卡骨架 + 能量脉冲。
 import { h } from "./dom.js";
+import { editorThumbUrl } from "./api.js";
+
+// 视频缩略图（素材库 / 收藏库 / 时间线小格共用）：
+//   ① 优先后端 ffmpeg 抽的首帧 jpg（快、省流量，且同名覆盖会自动重抽）
+//   ② 抽帧失败（无 ffmpeg / 非常规编码）→ 退回 <video preload=metadata> 取帧
+//   ③ 两种情况都加一个 ▶ 角标，明确"这是一段视频，点开能播"
+export function videoThumb(rel, url) {
+  const box = h("div", { class: "th" });
+  const badge = () => h("span", {
+    style: { position: "absolute", right: 4, bottom: 4, zIndex: 2, fontSize: 11, lineHeight: "14px",
+             padding: "1px 5px", borderRadius: 7, background: "rgba(2,4,9,.72)", color: "#ffd98f",
+             pointerEvents: "none", fontWeight: 700 },
+  }, "▶ 视频");
+  if (rel) {
+    const img = h("img", { src: editorThumbUrl(rel), alt: "", loading: "lazy" });
+    img.onerror = () => {
+      // 抽帧失败 → 用 video 元素自己出首帧（#t=0.1 逼浏览器解码第一帧）
+      if (img.parentElement) img.parentElement.replaceChild(
+        h("video", { src: url + "#t=0.1", muted: true, playsinline: true, preload: "metadata",
+                     style: { width: "100%", height: "100%", objectFit: "cover" } }), img);
+    };
+    box.appendChild(img);
+  } else {
+    box.appendChild(h("video", { src: url + "#t=0.1", muted: true, playsinline: true, preload: "metadata",
+                                 style: { width: "100%", height: "100%", objectFit: "cover" } }));
+  }
+  box.appendChild(badge());
+  return box;
+}
+
+// 音频卡缩略：🎵 + 明确的"可试听"角标（以前只有一个光秃秃的 🎵，用户不知道能点）
+export function audioThumb() {
+  return h("div", { class: "th", style: { display: "flex", alignItems: "center", justifyContent: "center", position: "relative" } },
+    h("span", { style: { fontSize: 30 } }, "🎵"),
+    h("span", {
+      style: { position: "absolute", right: 4, bottom: 4, zIndex: 2, fontSize: 11, lineHeight: "14px",
+               padding: "1px 5px", borderRadius: 7, background: "rgba(2,4,9,.72)", color: "#ffd98f",
+               pointerEvents: "none", fontWeight: 700 },
+    }, "▶ 试听"));
+}
 
 export const CAT_LABEL = { role: "角色", scene: "场景", asset: "素材", audio: "音频", other: "其他" };
 export const CAT_CLS = { role: "role", scene: "scene", asset: "asset", audio: "audio" };
@@ -115,29 +155,41 @@ export function lightbox(src, kind = "image", options = {}) {
   st.cssText = "position:fixed;inset:0;z-index:2147483000;background:rgba(2,4,9,.92);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;";
   const media = kind === "video"
     ? Object.assign(document.createElement("video"), { src, controls: true, autoplay: true, muted: true, playsInline: true, preload: "metadata" })
-    : Object.assign(document.createElement("img"), { src, alt: "" });
-  media.style.cssText = "max-width:92vw;max-height:78vh;border-radius:10px;box-shadow:0 12px 60px rgba(0,0,0,.7);transition:transform .12s ease;transform-origin:center center;";
-  if (kind === "video") {
+    : kind === "audio"
+      ? Object.assign(document.createElement("audio"), { src, controls: true, autoplay: true, preload: "metadata" })
+      : Object.assign(document.createElement("img"), { src, alt: "" });
+  media.style.cssText = kind === "audio"
+    ? "width:min(560px,88vw);border-radius:10px;box-shadow:0 12px 60px rgba(0,0,0,.7);"
+    : "max-width:92vw;max-height:78vh;border-radius:10px;box-shadow:0 12px 60px rgba(0,0,0,.7);transition:transform .12s ease;transform-origin:center center;";
+  if (kind === "video" || kind === "audio") {
     media.addEventListener("error", () => {
       const err = h("div", { style: "color:#ffb4b4;font-size:13px;text-align:center;max-width:80vw;padding:12px 18px;background:rgba(0,0,0,.55);border-radius:8px;" },
-        "视频加载失败：", h("br"), h("code", { style: "color:#9fd0ff;word-break:break-all;" }, src));
+        (kind === "audio" ? "音频加载失败：" : "视频加载失败："), h("br"), h("code", { style: "color:#9fd0ff;word-break:break-all;" }, src));
       if (wrap.contains(media)) wrap.replaceChild(err, media);
       else wrap.appendChild(err);
     });
   }
 
-  // ---- 滚轮缩放（图片/视频通用）----
+  // ---- 滚轮缩放（仅图片/视频：音频缩放没意义，且会挡住 controls）----
   let zoom = 1;
-  const applyZoom = () => { media.style.transform = `scale(${zoom})`; if (zoomLbl) zoomLbl.textContent = Math.round(zoom * 100) + "%"; };
+  // ⚠ applyZoom 必须在函数作用域顶层声明：下面 gallery 切图 / 双击复位都会用到它，
+  //    放进 if 块里会变成 ReferenceError（曾经把灯箱点挂）
   const zoomLbl = document.createElement("div");
-  zoomLbl.style.cssText = "position:fixed;right:18px;bottom:16px;color:#ffd98f;background:rgba(0,0,0,.55);border:1px solid rgba(255,209,102,.35);border-radius:8px;padding:3px 9px;font-size:11.5px;font-weight:700;z-index:2147483001;";
-  wrap.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    zoom = Math.min(5, Math.max(0.1, zoom + (e.deltaY < 0 ? 0.12 : -0.12)));
-    applyZoom();
-  }, { passive: false });
-  // 双击复位
-  media.addEventListener("dblclick", () => { zoom = 1; applyZoom(); });
+  const applyZoom = () => {
+    if (kind === "audio") return;
+    media.style.transform = `scale(${zoom})`;
+    if (zoomLbl) zoomLbl.textContent = Math.round(zoom * 100) + "%";
+  };
+  if (kind !== "audio") {
+    zoomLbl.style.cssText = "position:fixed;right:18px;bottom:16px;color:#ffd98f;background:rgba(0,0,0,.55);border:1px solid rgba(255,209,102,.35);border-radius:8px;padding:3px 9px;font-size:11.5px;font-weight:700;z-index:2147483001;";
+    wrap.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      zoom = Math.min(5, Math.max(0.1, zoom + (e.deltaY < 0 ? 0.12 : -0.12)));
+      applyZoom();
+    }, { passive: false });
+    // 双击复位
+    media.addEventListener("dblclick", () => { zoom = 1; applyZoom(); });
+  }
 
   // ---- 多图导航（gallery）----
   const gallery = Array.isArray(options.gallery) && options.gallery.length ? options.gallery : null;
@@ -202,7 +254,7 @@ export function lightbox(src, kind = "image", options = {}) {
     const prev = mkNav("‹", -1), next = mkNav("›", 1);
     extras.push(prev, next, navLbl);
   }
-  extras.push(zoomLbl);
+  if (kind !== "audio") extras.push(zoomLbl);   // 音频不显示缩放百分比
   applyZoom();
   _lb = wrap;
   _lb._extras = extras;

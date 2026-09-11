@@ -4,7 +4,7 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { mountApp } from "./app.js";
 
-const MRNEXT_VERSION = "1.11.2"; // 改这个就能让你 Ctrl+F5 后用右键"检查"看 widget header 是不是新版本
+const MRNEXT_VERSION = "1.11.3"; // 改这个就能让你 Ctrl+F5 后用右键"检查"看 widget header 是不是新版本
 console.log("[MRBoardNext] extension loaded · v" + MRNEXT_VERSION);
 
 app.registerExtension({

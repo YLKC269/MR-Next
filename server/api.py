@@ -117,7 +117,21 @@ def _kind_of(name):
     return "file"
 
 
-def _list_files(folder, kind="all"):
+# 资产文件夹里的「媒体子目录」约定：视频放 <folder>/video、音频放 <folder>/audio
+# （剪辑面板一直用 folder/video；时间线小格上传也走同一套）。以前 _list_files 只扫顶层，
+# 于是这些上传的文件**进不了素材库、也无法被 <Video N>/<Audio N> 引用**（用户实报：
+# "分镜块下方的视频/音频素材不能上传和引用"）。
+_MEDIA_SUBDIRS = {}
+
+def _media_subdir_list():
+    """延迟从 _KIND_EXTS 推：每个 kind 的子目录名 = kind（video/audio/image）。"""
+    if not _MEDIA_SUBDIRS:
+        for _k in _KIND_EXTS:
+            _MEDIA_SUBDIRS[_k] = _k
+    return _MEDIA_SUBDIRS
+
+
+def _list_files(folder, kind="all", subdirs=True):
     """列举资产文件夹里的媒体文件，按 kind 自动分类，同 kind 内按文件名字母序排序。
     每条记录携带 1-based `index`（同 kind 内，从 1 开始分配）——
     文本框里 `<Picture N>` / `<Audio N>` / `<Video N>` 用此 index 命中素材。
@@ -125,61 +139,87 @@ def _list_files(folder, kind="all"):
     这样：
       A. 老剧本里 `<Picture 3>` 引用 `image3.png`（末尾 3）—— 仍然精确命中。
       B. 没数字结尾的素材（如 `云妙衣.png`）按字母序拿到 N=1,2,3...，素材库导入顺序变化不会乱。
+
+    subdirs=True 时**同时收录 <folder>/video、<folder>/audio 里的文件**（各带 `sub` 字段），
+    这样上传到子目录的视频/音频也能被素材库显示、被 `<Video N>`/`<Audio N>` 引用。
     """
     base = _input_base()
     root = _safe_join(base, folder) if folder else base
     out = []
     if not os.path.isdir(root):
         return out
-    # 第一遍：按 kind 分组收集文件名（含末尾数字的优先抽 N）
-    pools = {"image": [], "audio": [], "video": []}
+    # 收集「(sub, name)」候选：顶层 + 已知媒体子目录（各一层）
+    cands = []          # [(sub, name, full)]
     for name in sorted(os.listdir(root)):
         full = os.path.join(root, name)
-        if not os.path.isfile(full):
-            continue
+        if os.path.isfile(full):
+            cands.append(("", name, full))
+        elif subdirs and os.path.isdir(full) and name in _media_subdir_list().values():
+            try:
+                for sub_name in sorted(os.listdir(full)):
+                    sub_full = os.path.join(full, sub_name)
+                    if os.path.isfile(sub_full):
+                        cands.append((name, sub_name, sub_full))
+            except OSError:
+                pass
+    # 第一遍：按 kind 分组收集（含末尾数字的优先抽 N）
+    pools = {"image": [], "audio": [], "video": []}
+    for sub, name, full in cands:
         k = _kind_of(name)
         if k not in pools:
             continue
         if kind != "all" and k != kind:
             continue
-        pools[k].append(name)
+        pools[k].append((sub, name, full))
 
     # 第二遍：每个 kind 内统一编号。无重复前提下优先保留文件名末尾数字，否则按字母序递增分配。
-    for k, names in pools.items():
+    for k, items in pools.items():
         # 先尝试用末尾数字 N
         used_n = set()  # 已分配的 N（防止 image1/image2/name3.png 撞号）
-        explicit = {}  # name -> N（来自末尾数字）
-        fallback = []  # 没法配 N 的，按字母序补位
-        for nm in names:
+        explicit = {}   # (sub, name) -> N（来自末尾数字）
+        fallback = []   # 没法配 N 的，按字母序补位
+        for sub, nm, full in items:
             stem = os.path.splitext(nm)[0]
             m = re.search(r"(\d+)\s*$", stem)
             if m:
                 n = int(m.group(1))
                 if n >= 1 and n not in used_n:
-                    explicit[nm] = n
+                    explicit[(sub, nm)] = n
                     used_n.add(n)
                     continue
-            fallback.append(nm)
+            fallback.append((sub, nm, full))
         # 给 fallback 按字母序分配未占用的 N（保持确定性，从 1 起）
         fb_cursor = 1
-        for nm in fallback:
+        for sub, nm, full in fallback:
             while fb_cursor in used_n:
                 fb_cursor += 1
-            explicit[nm] = fb_cursor
+            explicit[(sub, nm)] = fb_cursor
             used_n.add(fb_cursor)
 
         # 输出：按 N 升序拍平
-        ordered = sorted(explicit.items(), key=lambda x: (x[1], x[0]))
-        for name, n in ordered:
-            full = os.path.join(root, name)
+        ordered = sorted(explicit.items(), key=lambda x: (x[1], x[0][1]))
+        for (sub, name), n in ordered:
+            full = os.path.join(root, sub, name) if sub else os.path.join(root, name)
+            try:
+                size, mtime = os.path.getsize(full), int(os.path.getmtime(full))
+            except OSError:
+                continue
             out.append({
                 "name": name,
+                "sub": sub,                 # "" | "video" | "audio"（前端据此拼 rel/URL）
                 "kind": k,
-                "size": os.path.getsize(full),
-                "mtime": int(os.path.getmtime(full)),
+                "size": size,
+                "mtime": mtime,
                 "index": n,                 # 1-based, 同 kind 内唯一
             })
     return out
+
+
+def rel_of_file(folder, rec):
+    """把 _list_files 的一条记录拼成相对 input 的 rel（含子目录）。"""
+    sub = str(rec.get("sub") or "").strip("/")
+    name = str(rec.get("name") or "")
+    return "/".join(x for x in [(folder or "").strip("/"), sub, name] if x)
 
 
 def _json(data, status=200):
@@ -1065,13 +1105,14 @@ def _scan_per_shot_refs(bodies, folder, tagBindings=None, roleImages=None, prefi
         if not os.path.isdir(base):
             return out
         for f in _list_files(folder, kind):
+            mid = str(f.get("sub") or "").strip("/")        # "video" / "audio" / ""
             out[f["index"]] = {
                 "kind": kind,
                 "index": f["index"] - 1,             # 0-based 给前端消费
-                "rel": (sub + f["name"]).lstrip("/"),
+                "rel": (sub + (mid + "/" if mid else "") + f["name"]).lstrip("/"),
                 "fileName": f["name"],
                 "type": "input",
-                "subfolder": sub.rstrip("/") if sub else "",
+                "subfolder": (sub.rstrip("/") + ("/" + mid if mid else "")).strip("/"),
             }
         return out
 
@@ -1922,7 +1963,7 @@ async def editor_videos(req):
     rel = (folder + "/video") if folder else "video"
     vids = []
     for f in _list_files(rel, "video"):
-        vids.append({**f, "rel": rel + "/" + f["name"]})
+        vids.append({**f, "rel": rel_of_file(rel, f)})
     # 节点 Queue 出片（subgraph SaveVideo）落在 output/video，也纳入剪辑素材区
     try:
         out_dir = os.path.join(folder_paths.get_output_directory(), "video")
@@ -2747,10 +2788,14 @@ async def h3_shot(req):
     # 音色参考（<Audio N>）：r2v 组节点 ref_audios.ref_audio_{k} —— 以前前端没发/后端没接，
     # 用户看到的「音色参考不起作用」= 这条链整段断了
     audios = [x for x in ([_rel(a) for a in (body.get("audio") or [])] if body.get("audio") else []) if x]
+    # 参考视频（<Video N>）：官方 ref_videos.ref_video_{k}（IMAGE 帧序列）——以前前端没发/后端没接，
+    # 于是素材区里放进去的视频只是"存了个路径"，出片完全不用它
+    videos = [x for x in ([_rel(a) for a in (body.get("video") or [])] if body.get("video") else []) if x]
     # 编号映射（官方参考槽按编号：ref_image_{k} ↔ <Picture {k+1}>）——前端把"标记的编号 → rel"发过来，
     # 后端据此把第 N 号放进槽 N-1；没有它就只能按列表顺序接（标记 <Picture 1>/<Picture 3> 会错位）
     _ref_by_num = body.get("refByNum") if isinstance(body.get("refByNum"), dict) else None
     _aud_by_num = body.get("audioByNum") if isinstance(body.get("audioByNum"), dict) else None
+    _vid_by_num = body.get("videoByNum") if isinstance(body.get("videoByNum"), dict) else None
     # 幽灵素材过滤：素材被清理后，前端/store 缓存里的 rel 可能还在，这里按磁盘实际存在性剔除，
     # 否则已删除的首帧图/参考图会继续参与构图，污染其它模式的适配生成。
     dropped = []
@@ -2805,6 +2850,9 @@ async def h3_shot(req):
             except (OSError, ValueError):
                 pass
         _aud_bn = _aud_bn or None
+    _vid_bn = None
+    if isinstance(_vid_by_num, dict):
+        _vid_bn = {k: v for k, v in _vid_by_num.items() if _media_exists(v)} or None
 
     try:
         path = await h3mod.run_shot(
@@ -2812,8 +2860,10 @@ async def h3_shot(req):
             first_frame=first_frame,
             last_frame=last_frame,
             audios=[a for a in audios if _media_exists(a)] or None,
+            videos=[v for v in videos if _media_exists(v)] or None,
             ref_by_num=_ref_bn,
             audio_by_num=_aud_bn,
+            video_by_num=_vid_bn,
             refs=refs or None,
             steps=int(steps) if steps not in (None, "") else None,
             cfg=float(cfg) if cfg not in (None, "") else None,
@@ -2902,10 +2952,12 @@ async def h3_dry(req):
     lf = (body.get("last_frame") or "").strip()
     refs = body.get("refs") or []
     audios_dry = body.get("audio") or []
+    videos_dry = body.get("video") or []
     # 干跑必须带上 opts（尺寸/步数/百万像素…），否则校验的不是"真正要跑的那张图"
     opts_dry = body.get("opts") if isinstance(body.get("opts"), dict) else None
     rbn_dry = body.get("refByNum") if isinstance(body.get("refByNum"), dict) else None
     abn_dry = body.get("audioByNum") if isinstance(body.get("audioByNum"), dict) else None
+    vbn_dry = body.get("videoByNum") if isinstance(body.get("videoByNum"), dict) else None
     server = PromptServer.instance
     try:
         graph = h3mod.build_shot_graph(
@@ -2913,8 +2965,10 @@ async def h3_dry(req):
             first_frame=ff or None, last_frame=lf or None,
             refs=[x for x in refs if x] or None,
             audios=[x for x in audios_dry if x] or None,
+            videos=[x for x in videos_dry if x] or None,
             ref_by_num=rbn_dry,
             audio_by_num=abn_dry,
+            video_by_num=vbn_dry,
             opts=opts_dry,
             _variant=variant or None,
         )

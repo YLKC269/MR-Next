@@ -511,8 +511,11 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
   transition: border-color .15s var(--ease), transform .15s var(--ease); }
 .mm-cell:hover { border-color: var(--accent, #4f9fe8); transform: translateY(-1px); }
 .mm-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 视频/音频小格：缩略图容器铺满格子（videoThumb/audioThumb 产出 .th 结构）*/
+.mm-cell .th { position: absolute; inset: 0; }
+.mm-cell .th img, .mm-cell .th video { width: 100%; height: 100%; object-fit: cover; display: block; background: #05070c; }
 .mm-cell .mm-plus { color: #4a5b76; font-size: clamp(14px, 1.5cqw, 22px); line-height: 1; user-select: none; }
-.mm-cell .mm-x { position: absolute; top: 0; right: 0; width: clamp(14px, 1.5cqw, 22px); height: clamp(14px, 1.5cqw, 22px); border-radius: 0 0 0 6px;
+.mm-cell .mm-x { position: absolute; top: 0; right: 0; z-index: 4; width: clamp(14px, 1.5cqw, 22px); height: clamp(14px, 1.5cqw, 22px); border-radius: 0 0 0 6px;
   background: rgba(0, 0, 0, 0.72); color: #ff7b7b; font-size: 9px; line-height: 14px; text-align: center; cursor: pointer; }
 .mm-cell .mm-x:hover { background: #7a1f1f; color: #fff; }
 .mm-cell .mm-idx { position: absolute; left: 2px; bottom: 1px; font-size: clamp(8px, .85cqw, 11px); color: #ffd166; background: rgba(0,0,0,0.5);

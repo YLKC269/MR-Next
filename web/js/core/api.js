@@ -156,6 +156,26 @@ export function editorThumbUrl(rel) {
   return api.apiURL("/mrnext/editor/thumb?rel=" + encodeURIComponent(rel));
 }
 
+// 素材记录（后端 /mrnext/studio/files 的一条）→ 相对 input 的 rel。
+// 记录里可能带 sub（"video"/"audio"）—— 视频/音频会被上传到 <folder>/video、<folder>/audio，
+// 以前只拼 folder + name，于是这些素材的 rel 是错的（预览 404、引用也匹配不上）。
+export function recRel(folder, rec) {
+  const clean = (s) => String(s == null ? "" : s).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const sub = clean(rec && rec.sub);
+  const nm = clean(rec && (rec.name || rec.filename));
+  return [clean(folder), sub, nm].filter(Boolean).join("/");
+}
+
+// 同上，但直接给出可展示 URL（/view）。subfolder 要把 folder 与 kind 子目录都带上。
+export function recViewUrl(folder, rec) {
+  const clean = (s) => String(s == null ? "" : s).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  return viewUrl({
+    filename: clean(rec && (rec.name || rec.filename)),
+    subfolder: [clean(folder), clean(rec && rec.sub)].filter(Boolean).join("/"),
+    type: "input",
+  });
+}
+
 // 把 rel（如 "mrboard_next/云妙衣.png" 或 "OUTPUT:video/xxx.mp4"）转成可展示 URL
 export function relToViewUrl(rel) {
   if (!rel) return "";

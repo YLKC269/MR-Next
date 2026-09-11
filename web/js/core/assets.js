@@ -5,7 +5,7 @@
 //   - refs:  引用绑定（name→rel），公共前缀面板（authoritative）写入，其余面板只读 → 单向同步
 // 所有面板共用这一份，数据变化时 notify 订阅者重渲染 token。
 
-import { StudioAPI } from "./api.js";
+import { StudioAPI, recRel } from "./api.js";
 import { cleanAssets, isUsableRel } from "./purify.js";
 
 let folder = "mrboard_next";
@@ -135,18 +135,56 @@ function loadOrder(folder, kind) {
 function saveOrder(folder, kind, names) {
   try { localStorage.setItem(ORDER_LS_PREFIX + folder + "::" + kind, JSON.stringify(names || [])); } catch (_) {}
 }
-function applyCustomOrder(files, folder, kind) {
-  if (!files || !files.length) return files;
-  const custom = loadOrder(folder, kind);
-  if (!custom.length) return files;
-  const byName = new Map(files.map((f) => [f.name, f]));
+// 排序键：带 kind 子目录（video/、audio/）时用 "sub/name"，避免同名文件在不同子目录里撞键
+function orderKey(f) {
+  return ((f && f.sub) ? String(f.sub).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "") + "/" : "")
+    + String((f && f.name) || "");
+}
+// 单 kind 套用自定义顺序；没有该 kind 的记录时回退旧的 "all" 键（兼容升级前存的顺序）
+function applyOneKind(list, folder, kind) {
+  let custom = loadOrder(folder, kind);
+  if (!custom.length) custom = loadOrder(folder, "all");
+  if (!custom.length) return list;
+  // 键兼容两种写法：新格式 "audio/名字.wav"（带 kind 子目录）与老格式 "名字.wav"。
+  // 老用户升级上来时存的是裸文件名 —— 不做回退匹配的话，他们原来的顺序会整段失效。
+  const byKey = new Map(list.map((f) => [orderKey(f), f]));
+  const byName = new Map(list.map((f) => [String((f && f.name) || ""), f]));
+  const used = new Set();
   const out = [];
-  for (const n of custom) { if (byName.has(n)) { out.push(byName.get(n)); byName.delete(n); } }
-  for (const f of files) if (byName.has(f.name)) out.push(f);
+  for (const n of custom) {
+    const f = byKey.get(n) || byName.get(n);
+    if (f && !used.has(f)) { out.push(f); used.add(f); }
+  }
+  for (const f of list) if (!used.has(f)) out.push(f);
   return out;
 }
+// 应用自定义顺序。⚠ kind="all" 时**按 kind 分别套用各自的顺序** —— 素材库「音频」页拖出来的顺序
+// 必须对「全部」页、以及 `<Audio N>` 引用标记同时生效。以前 "all" 用独立的 folder::all 顺序，
+// 于是"改了音频顺序，引用标记不跟着变"（用户实报）。
+function applyCustomOrder(files, folder, kind) {
+  if (!files || !files.length) return files;
+  if (kind !== "all") return applyOneKind(files, folder, kind);
+  const kinds = [];
+  const groups = {};
+  for (const f of files) {
+    const k = (f && f.kind) || "other";
+    if (!groups[k]) { groups[k] = []; kinds.push(k); }
+    groups[k].push(f);
+  }
+  const out = [];
+  for (const k of kinds) out.push(...applyOneKind(groups[k], folder, k));
+  return out;
+}
+// 拖拽换位 → 立即持久化。kind="all" 时**按 kind 拆开各存一份**（保证顺序源唯一）
 function persistOrderFromFiles(files, folder, kind) {
-  saveOrder(folder, kind, files.map((f) => f.name));
+  if (kind !== "all") { saveOrder(folder, kind, files.map(orderKey)); return; }
+  const groups = {};
+  for (const f of files) {
+    const k = (f && f.kind) || "other";
+    (groups[k] || (groups[k] = [])).push(orderKey(f));
+  }
+  for (const k of Object.keys(groups)) saveOrder(folder, k, groups[k]);
+  saveOrder(folder, "all", files.map(orderKey));   // 兼容旧键（升级前的顺序不至于丢）
 }
 
 // 按 kind 重算 1-based index（image/audio/video 各自独立编号），与素材库面板 <Picture N> 徽章一致
@@ -183,7 +221,9 @@ async function refresh(f) {
     favs = cleanAssets(rawFavs);
     // 素材库顺序：后端字母序 → 应用自定义拖拽顺序 → 按 kind 重算 index
     // 这样 token 的 <Picture N> 与「素材库」面板显示的徽章完全对齐
-    const raw = (rr.files || rr.items || []).map((a) => ({ ...a, rel: a.rel || (f0 + "/" + a.name) }));
+    // rel 必须带上 kind 子目录（video/、audio/）—— 上传的视频/音频就在子目录里，
+    // 拼漏了会导致预览 404 且 <Video N>/<Audio N> 引用匹配不上（用户实报）
+    const raw = (rr.files || rr.items || []).map((a) => ({ ...a, rel: a.rel || recRel(f0, a) }));
     const droppedFiles = raw.length - cleanAssets(raw).length;
     files = reindexByKind(applyCustomOrder(cleanAssets(raw), f0, "all"));
     if (droppedFavs || droppedFiles) {

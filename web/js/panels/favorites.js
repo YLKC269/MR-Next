@@ -2,7 +2,7 @@
 // v1.1 UI：分类计数 tab + 1:1 缩略卡（分类色边/渐变遮罩）+ hover 操作 + 灯箱预览
 import { h, clear } from "../core/dom.js";
 import { relToViewUrl } from "../core/api.js";
-import { lightbox, inlineRename, contextMenu, closeContextMenu } from "../core/ui.js";
+import { lightbox, inlineRename, contextMenu, closeContextMenu, videoThumb, audioThumb } from "../core/ui.js";
 import { assetRegistry } from "../core/assets.js";
 import { assetDirRow, saveAssetHere, revealRel, startAssetWatch, missingOf, CAT_CN } from "../core/asset_io.js";
 
@@ -70,9 +70,11 @@ export function createFavoritesPanel(ctx) {
         // 缩略图加载失败（源文件被删 / 脏引用）→ 隐藏破图，不留裂图占位
         card.appendChild(h("div", { class: "th" }, h("img", { src: url, alt: it.name, loading: "lazy", decoding: "async", onerror: "this.style.display='none'" })));
       } else if (it.kind === "video" && url) {
-        card.appendChild(h("div", { class: "th" }, h("video", { src: url, muted: true, playsinline: true, preload: "metadata" })));
+        card.appendChild(videoThumb(it.rel, url));
+      } else if (it.kind === "audio" && url) {
+        card.appendChild(audioThumb());
       } else {
-        card.appendChild(h("div", { class: "th", style: { display: "flex", alignItems: "center", justifyContent: "center" } }, h("span", { style: { fontSize: 30 } }, it.kind === "audio" ? "🎵" : "🗂")));
+        card.appendChild(h("div", { class: "th", style: { display: "flex", alignItems: "center", justifyContent: "center" } }, h("span", { style: { fontSize: 30 } }, "🗂")));
       }
       card.appendChild(h("div", { class: "veil" }));
       card.appendChild(h("div", { class: "kd" }, it.kind === "image" ? "图片" : it.kind === "video" ? "视频" : "音频"));
@@ -117,7 +119,8 @@ export function createFavoritesPanel(ctx) {
           } },
         ]);
       };
-      card.onclick = () => { if (url && it.kind !== "audio") lightbox(url, it.kind); else ctx.toast("音频素材：请到剪辑面板试听", true); };
+      // 音频也直接在灯箱里试听（以前只弹一句"去剪辑面板试听"）
+      card.onclick = () => { if (url) lightbox(url, it.kind); else ctx.toast("文件已丢失：" + it.rel, true); };
       grid.appendChild(card);
     }
   };

@@ -5,7 +5,7 @@ import { h, clear } from "../core/dom.js";
 import { relToViewUrl, editorThumbUrl } from "../core/api.js";
 import { createMentionEditor } from "../core/mentions.js";
 import { assetRegistry } from "../core/assets.js";
-import { lightbox, closeLightbox } from "../core/ui.js";
+import { lightbox, closeLightbox, videoThumb, audioThumb } from "../core/ui.js";
 import { stripVirtualRefs, isUsableRel } from "../core/purify.js";
 import { VIDEO_SIZES, DEFAULT_VID_SIZE_INDEX, CUSTOM_VID_SIZE_INDEX, resolveVidSize, mpToWH } from "../core/sizes.js";
 
@@ -326,9 +326,18 @@ export function createTimelinePanel(ctx) {
       ...(assetRegistry.favs || []).map((f) => f.name),
       ...(assetRegistry.files || []).map((f) => String((f && f.name) || "").replace(/\.[^.]+$/, "")),
     ].filter(Boolean));
+    // 按名字引用（@名 或正文里直接写名字）：**必须按素材自身的 kind 归类** ——
+    // 视频/音频名以前被一股脑塞进图片九宫格（于是音频永远进不了音频槽、引用不到）
+    const allRecs = [...(assetRegistry.favs || []), ...(assetRegistry.files || [])];
     for (const nm of [...names].sort((a, b) => b.length - a.length)) {
       if (!t.includes(nm)) continue;
-      push("image", assetRegistry.relOf(nm));
+      const rec = allRecs.find((x) => {
+        if (!x) return false;
+        const stem = String(x.name || "").replace(/\.[^.]+$/, "");
+        return x.name === nm || stem === nm;
+      });
+      const kk = rec && rec.kind === "video" ? "video" : rec && rec.kind === "audio" ? "audio" : "image";
+      push(kk, (rec && rec.rel) || assetRegistry.relOf(nm));
     }
     out.byNum = byNum;
     return out;
@@ -1029,30 +1038,80 @@ export function createTimelinePanel(ctx) {
   };
 
   // ---------- 视频/音频 3 格小格子 ----------
+  // 约定（与剪辑面板一致）：视频传到 <folder>/video、音频传到 <folder>/audio ——
+  // 后端 _list_files 会收录这两个子目录，所以上传后**立刻能被素材库看到、被
+  // `<Video N>` / `<Audio N>` 引用**（以前视频传子目录但列表页不扫子目录 → 出了片却引用不上）。
+  // 预览：视频用 ffmpeg 抽首帧（失败退回 <video> 取帧），音频点开直接在灯箱里试听。
   const subSlot = (c, slot, refreshEditor) => {
     const grid = h("div", { class: "mm-grid" });
     const up = h("input", { type: "file", multiple: true, accept: slot.accept, style: { display: "none" } });
     const isV = slot.kind === "video";
+    const subDir = isV ? "video" : "audio";     // 与剪辑面板/后端 _list_files 的子目录约定一致
+    const targetDir = () => [folder(), subDir].filter(Boolean).join("/");
     up.onchange = async () => {
+      let added = 0;
       for (const f of up.files) {
         if (c.media[slot.kind].length >= slot.cap) { ctx.toast(`${slot.label}最多 ${slot.cap} 个`, true); break; }
-        const target = isV && folder() ? folder() + "/video" : folder();
-        try { await ctx.api.upload(target, f); c.media[slot.kind].push((target ? target + "/" : "") + f.name); } catch (e) { ctx.toast("上传失败: " + e.message, true); }
+        const target = targetDir();
+        try {
+          await ctx.api.upload(target, f);
+          c.media[slot.kind].push((target ? target + "/" : "") + f.name);
+          added++;
+        } catch (e) { ctx.toast("上传失败: " + e.message, true); }
       }
-      up.value = ""; paint(); refreshEditor();
+      up.value = "";
+      // 上传后刷新全局资产注册表：新文件立刻进素材库、能按 <Video N>/<Audio N> 被引用
+      if (added) { try { await assetRegistry.refresh(folder()); } catch (_) {} }
+      paint(); refreshEditor();
+      if (added) ctx.toast(`已上传 ${added} 个${slot.label}素材（可直接用 <${isV ? "Video" : "Audio"} N> 引用）`);
+    };
+    // 从素材库选（同一 kind 的现有素材），不用先重新上传
+    const pick = h("select", { class: "select", style: { width: 128, padding: "2px 5px", fontSize: 11 } },
+      h("option", { value: "" }, "素材库选…"));
+    const fillPick = () => {
+      const prev = pick.value;
+      clear(pick);
+      pick.appendChild(h("option", { value: "" }, "素材库选…"));
+      const pool = (assetRegistry.files || []).filter((f) => f && f.kind === slot.kind && f.rel);
+      for (const f of pool) {
+        pick.appendChild(h("option", { value: String(f.index) }, `<${isV ? "Video" : "Audio"} ${f.index}> ${f.name}`));
+      }
+      if (prev && [...pick.options].some((o) => o.value === prev)) pick.value = prev;
+    };
+    pick.onfocus = fillPick;
+    pick.onchange = async () => {
+      fillPick();
+      const idx = Number(pick.value);
+      pick.value = "";
+      if (!idx) return;
+      const f = (assetRegistry.files || []).find((x) => x && x.kind === slot.kind && Number(x.index) === idx);
+      if (!f || !f.rel) { ctx.toast("素材库里找不到这一项", true); return; }
+      const arr = c.media[slot.kind];
+      if (arr.includes(f.rel)) { ctx.toast("已经在格子里了", true); return; }
+      if (arr.length >= slot.cap) { ctx.toast(`${slot.label}最多 ${slot.cap} 个`, true); return; }
+      arr.push(f.rel);
+      paint(); refreshEditor();
     };
     const paint = () => {
       clear(grid);
+      const arr = c.media[slot.kind];
       for (let k = 0; k < slot.cap; k++) {
-        const rel = c.media[slot.kind][k];
-        const cell = h("div", { class: "mm-cell", title: rel ? rel : `点击上传${slot.label}` });
+        const rel = arr[k];
+        const cell = h("div", { class: "mm-cell" + (rel && isV ? " has-video" : ""), title: rel ? `${rel}
+（点击预览${isV ? "播放" : "试听"} · 右上角 × 移除）` : `点击上传${slot.label}` });
         if (rel) {
-          if (isV) cell.appendChild(h("img", { src: editorThumbUrl(rel), onerror: "this.style.display='none'" }));
-          else cell.appendChild(h("div", { style: { width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, color: "#9fb0c6" } }, "♪"));
-          cell.appendChild(h("span", { class: "mm-x", title: "移除", onclick: (ev) => { ev.stopPropagation(); c.media[slot.kind].splice(k, 1); paint(); refreshEditor(); } }, "✕"));
+          const url = relToViewUrl(rel);
+          const thumb = isV ? videoThumb(rel, url) : audioThumb();
+          thumb.style.width = "100%"; thumb.style.height = "100%";
+          cell.appendChild(thumb);
+          cell.onclick = (ev) => {
+            if (ev.target && ev.target.closest && ev.target.closest(".mm-x")) return;
+            if (url) lightbox(url, slot.kind);
+          };
+          cell.appendChild(h("span", { class: "mm-x", title: "移除", onclick: (ev) => { ev.stopPropagation(); arr.splice(k, 1); paint(); refreshEditor(); } }, "✕"));
         } else {
-          cell.appendChild(h("span", { class: "mm-plus" }, k === c.media[slot.kind].length ? "＋" : ""));
-          cell.onclick = () => { if (k === c.media[slot.kind].length) up.click(); };
+          cell.appendChild(h("span", { class: "mm-plus" }, k === arr.length ? "＋" : ""));
+          cell.onclick = () => { if (k === arr.length) up.click(); };
         }
         grid.appendChild(cell);
       }
@@ -1063,6 +1122,7 @@ export function createTimelinePanel(ctx) {
         h("b", { style: { fontSize: 11.5 } }, slot.label),
         h("span", { class: "muted", style: { fontSize: 11 } }, `${c.media[slot.kind].length}/${slot.cap}`),
         h("div", { class: "mx-spacer" }),
+        pick,
         h("button", { class: "btn", style: { padding: "2px 7px", fontSize: 11 }, onclick: () => up.click() }, "上传")),
       grid);
   };
@@ -1432,11 +1492,16 @@ export function createTimelinePanel(ctx) {
         const _bn = refsFromText(c.prompt || (ctx.store.get().shots || [])[i]?.text || "").byNum || {};
         if (_bn.image && Object.keys(_bn.image).length) payload.refByNum = _bn.image;
         if (_bn.audio && Object.keys(_bn.audio).length) payload.audioByNum = _bn.audio;
+        if (_bn.video && Object.keys(_bn.video).length) payload.videoByNum = _bn.video;
       } catch (_) { /* 解析失败不影响出片 */ }
       // 音色参考：r2v 组节点有 ref_audios.ref_audio_{k} 输入（官方），把音频小格里的素材一起送过去，
       // 否则「音色参考 <Audio N>」只是句空话（用户实报：音频参考不起作用）
       const auds = ((c.media && c.media.audio) || []).filter(Boolean).slice(0, 3);
       if (auds.length) payload.audio = auds;
+      // 参考视频（<Video N> → 官方 ref_videos.ref_video_{k}）：素材区视频格里的素材一起发过去，
+      // 否则视频只是"存了个路径"，出片完全不参考它
+      const vids = ((c.media && c.media.video) || []).filter(Boolean).slice(0, 3);
+      if (vids.length) payload.video = vids;
     }
     // 音色参考回执：官方只在「参考生视频(R2V)」有 ref_audios.ref_audio_{N-1} 槽位。
     // 别的模式标了 <Audio N> 也发不出去 → 必须明说，否则用户以为"标了就生效"（用户实报）。
@@ -1450,6 +1515,20 @@ export function createTimelinePanel(ctx) {
         const _miss = _tags.filter((n) => !_au[n - 1]);
         if (_miss.length) {
           println(`⚠ <Audio ${_miss.join("> <Audio ")}> 找不到对应音频（本镜音频槽只有 ${_au.length} 条，最多 3 条）→ 这几条音色参考不会生效；请在正文里改用 @音频名 或点音频格第 ${_miss[0]} 格上传`, "#ffb35c");
+        }
+      }
+      // 参考视频回执：官方只在 R2V 有 ref_videos.ref_video_{k} 槽位
+      const _vtags = [...new Set([...String(text).matchAll(/<\s*Video\s*(\d+)\s*>/gi)]
+        .map((m) => parseInt(m[1], 10)).filter((n) => n > 0))].sort((a, b) => a - b);
+      if (_vtags.length) {
+        const _vv = ((c.media && c.media.video) || []).filter(Boolean);
+        if (P.mode !== "r2v") {
+          println(`⚠ 本镜标了 <Video ${_vtags.join("> <Video ")}> 参考视频，但当前是「${modeLabel(P.mode)}」模式 —— 官方只有「参考生视频(R2V)」支持参考视频，切到 R2V 才会生效`, "#ffb35c");
+        } else {
+          const _vmiss = _vtags.filter((n) => !_vv[n - 1]);
+          if (_vmiss.length) {
+            println(`⚠ <Video ${_vmiss.join("> <Video ")}> 找不到对应视频（本镜视频槽只有 ${_vv.length} 条）→ 请在「视频」格里上传，或点该格从素材库选`, "#ffb35c");
+          }
         }
       }
     } catch (_) { /* 回执失败不影响出片 */ }

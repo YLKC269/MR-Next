@@ -519,8 +519,8 @@ def _deep_replace_num(obj, old_num, new_num):
 
 def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
                      first_frame=None, last_frame=None, refs=None, audios=None,
-                     ref_by_num=None, audio_by_num=None, _variant=None,
-                     steps=None, cfg=None, opts=None):
+                     ref_by_num=None, audio_by_num=None, videos=None, video_by_num=None,
+                     _variant=None, steps=None, cfg=None, opts=None):
     """返回 API prompt dict（数字字符串 node id）。
 
     opts 字段（覆盖官方默认）：unet_name, clip_name, video_vae_name, audio_vae_name, lora_name,
@@ -714,10 +714,13 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
 
         img_rels, img_rename = _compact(ref_by_num, refs, 9)
         aud_rels, aud_rename = _compact(audio_by_num, audios, 3)
+        vid_rels, vid_rename = _compact(video_by_num, videos, 3)
         if ref_by_num:
             prompt = _renumber(prompt, "Picture", img_rename)
         if audio_by_num:
             prompt = _renumber(prompt, "Audio", aud_rename)
+        if video_by_num:
+            prompt = _renumber(prompt, "Video", vid_rename)
         # Director 的 global_prompt 也用改号后的提示词（它是 fallback/公共段来源，
         # 留着旧标记会在 common 模式下重新引入对不上的 <Picture N>/<Audio N>）
         widget["global_prompt"] = prompt
@@ -727,6 +730,35 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             g_ins[f"ref_images.ref_image_{k}"] = link(add("LoadImage", {"image": rel}))
         for k, rel in enumerate(aud_rels):
             g_ins[f"ref_audios.ref_audio_{k}"] = link(add("LoadAudio", {"audio": rel}))
+        # 参考视频：官方 ref_video_k 收的是**帧序列 (IMAGE)**，不是文件路径
+        #   → 需要一个「视频 → IMAGE 帧」的加载节点。优先 VHS（可控帧率/帧数），
+        #     退回 ComfyUI 自带的 LoadVideoUI；两个都没有就跳过并记一笔（不让整镜失败）。
+        _vload = None
+        try:
+            import nodes as _nodes_mod
+            _avail = getattr(_nodes_mod, "NODE_CLASS_MAPPINGS", {}) or {}
+            for _cand in ("VHS_LoadVideoPath", "VHS_LoadVideo", "LoadVideoUI"):
+                if _cand in _avail:
+                    _vload = _cand
+                    break
+        except Exception:  # noqa: BLE001
+            _vload = None
+        if vid_rels and not _vload:
+            print("[MRBoardNext] 参考视频已选中，但本机没有可把视频转成帧的节点"
+                  "（VHS_LoadVideoPath / LoadVideoUI）→ 本镜跳过 <Video N> 参考")
+        elif vid_rels:
+            for k, rel in enumerate(vid_rels):
+                if _vload == "LoadVideoUI":
+                    _vin = {"video": rel, "frame_rate": 24, "start_time": 0, "end_time": 0,
+                            "duration": 0, "start_frame": 0, "end_frame": 0, "duration_frames": 0,
+                            "resize_method": "maintain aspect ratio", "custom_width": 0,
+                            "custom_height": 0, "display_mode": "seconds",
+                            "crop_x": 0, "crop_y": 0, "crop_w": 1, "crop_h": 1}
+                else:
+                    # 官方要求参考视频 2–15s @24fps；这里按 3s/72 帧封顶，避免参考 token 过多把显存吃光
+                    _vin = {"video": rel, "force_rate": 24.0, "custom_width": 0, "custom_height": 0,
+                            "frame_load_cap": 72, "skip_first_frames": 0, "select_every_nth": 1}
+                g_ins[f"ref_videos.ref_video_{k}"] = link(add(_vload, _vin))
         g_ins["prompt"] = prompt
         g_ins["duration_sec"] = float(seconds)
         grp = add("MiniMaxH3DirectorGroupReferenceToVideo", g_ins)
@@ -765,8 +797,8 @@ def _queue_extra_data(server):
 
 async def run_shot(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0,
                    first_frame=None, last_frame=None, refs=None, audios=None,
-                   ref_by_num=None, audio_by_num=None, steps=None, cfg=None,
-                   opts=None, timeout=2400):
+                   ref_by_num=None, audio_by_num=None, videos=None, video_by_num=None,
+                   steps=None, cfg=None, opts=None, timeout=2400):
     import execution
     from server import PromptServer
 
@@ -774,6 +806,7 @@ async def run_shot(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.
     graph = build_shot_graph(mode, prompt, seed=seed, seconds=seconds, frame_rate=frame_rate,
                              first_frame=first_frame, last_frame=last_frame, refs=refs,
                              audios=audios, ref_by_num=ref_by_num, audio_by_num=audio_by_num,
+                             videos=videos, video_by_num=video_by_num,
                              steps=steps, cfg=cfg, opts=opts)
     prompt_id = str(uuid.uuid4())
     number = float(getattr(server, "number", 0))
@@ -948,8 +981,8 @@ def _collect_video_after_sync(mode, seed, out_dir, before_files):
 
 def run_shot_sync(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0,
                   first_frame=None, last_frame=None, refs=None, audios=None,
-                  ref_by_num=None, audio_by_num=None, steps=None, cfg=None,
-                  opts=None, timeout=2400):
+                  ref_by_num=None, audio_by_num=None, videos=None, video_by_num=None,
+                  steps=None, cfg=None, opts=None, timeout=2400):
     """同步执行 H3 出片（供 MRBoardStudio 节点 execute() 调用）。
 
     节点 execute 运行在 worker 的 asyncio 事件循环里，不能再 asyncio.run / 再提交队列
@@ -963,6 +996,7 @@ def run_shot_sync(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0
     graph = build_shot_graph(mode, prompt, seed=seed, seconds=seconds, frame_rate=frame_rate,
                              first_frame=first_frame, last_frame=last_frame, refs=refs,
                              audios=audios, ref_by_num=ref_by_num, audio_by_num=audio_by_num,
+                             videos=videos, video_by_num=video_by_num,
                              steps=steps, cfg=cfg, opts=opts)
     prompt_id = "mrnext_sync_" + str(uuid.uuid4().hex)[:8]
 

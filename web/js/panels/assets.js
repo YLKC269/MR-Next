@@ -1,8 +1,8 @@
 // panels/assets.js — 素材库（浏览 / 上传 / 收藏入库 / 拖拽换位 / 收藏悬浮面板）
 // v1.2 UI：kind tab + 缩略卡（hover 收藏按钮/删除勾选 + 拖拽换位）+ 灯箱预览 + 右上角悬浮「收藏入库」面板
 import { h, clear } from "../core/dom.js";
-import { viewUrl, relToViewUrl } from "../core/api.js";
-import { lightbox, inlineRename, contextMenu, closeContextMenu } from "../core/ui.js";
+import { viewUrl, relToViewUrl, recRel, recViewUrl } from "../core/api.js";
+import { lightbox, inlineRename, contextMenu, closeContextMenu, videoThumb, audioThumb } from "../core/ui.js";
 import { assetRegistry } from "../core/assets.js";
 import { assetDirRow, saveAssetHere, revealRel, startAssetWatch, CAT_CN } from "../core/asset_io.js";
 
@@ -18,19 +18,56 @@ function loadOrder(folder, kind) {
 function saveOrder(folder, kind, names) {
   try { localStorage.setItem(ORDER_LS_PREFIX + folder + "::" + kind, JSON.stringify(names || [])); } catch (_) {}
 }
-function applyCustomOrder(files, folder, kind) {
-  if (!files || !files.length) return files;
-  const custom = loadOrder(folder, kind);
-  if (!custom.length) return files;
-  const byName = new Map(files.map((f) => [f.name, f]));
+// 排序键：带 kind 子目录（video/、audio/）时用 "sub/name"，避免同名文件在不同子目录里撞键
+function orderKey(f) {
+  return ((f && f.sub) ? String(f.sub).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "") + "/" : "")
+    + String((f && f.name) || "");
+}
+// 单 kind 套用自定义顺序；没有该 kind 的记录时回退旧的 "all" 键（兼容升级前存的顺序）
+function applyOneKind(list, folder, kind) {
+  let custom = loadOrder(folder, kind);
+  if (!custom.length) custom = loadOrder(folder, "all");
+  if (!custom.length) return list;
+  // 键兼容两种写法：新格式 "audio/名字.wav"（带 kind 子目录）与老格式 "名字.wav"。
+  // 老用户升级上来时存的是裸文件名 —— 不做回退匹配的话，他们原来的顺序会整段失效。
+  const byKey = new Map(list.map((f) => [orderKey(f), f]));
+  const byName = new Map(list.map((f) => [String((f && f.name) || ""), f]));
+  const used = new Set();
   const out = [];
-  for (const n of custom) { if (byName.has(n)) { out.push(byName.get(n)); byName.delete(n); } }
-  for (const f of files) if (byName.has(f.name)) out.push(f);
+  for (const n of custom) {
+    const f = byKey.get(n) || byName.get(n);
+    if (f && !used.has(f)) { out.push(f); used.add(f); }
+  }
+  for (const f of list) if (!used.has(f)) out.push(f);
   return out;
 }
-// 拖拽换位 → 立即把当前 visual 顺序存进 LS
+// 应用自定义顺序。⚠ kind="all" 时**按 kind 分别套用各自的顺序** —— 素材库「音频」页拖出来的顺序
+// 必须对「全部」页、以及 `<Audio N>` 引用标记同时生效。以前 "all" 用独立的 folder::all 顺序，
+// 于是"改了音频顺序，引用标记不跟着变"（用户实报）。
+function applyCustomOrder(files, folder, kind) {
+  if (!files || !files.length) return files;
+  if (kind !== "all") return applyOneKind(files, folder, kind);
+  const kinds = [];
+  const groups = {};
+  for (const f of files) {
+    const k = (f && f.kind) || "other";
+    if (!groups[k]) { groups[k] = []; kinds.push(k); }
+    groups[k].push(f);
+  }
+  const out = [];
+  for (const k of kinds) out.push(...applyOneKind(groups[k], folder, k));
+  return out;
+}
+// 拖拽换位 → 立即持久化。kind="all" 时**按 kind 拆开各存一份**（保证顺序源唯一）
 function persistOrderFromFiles(files, folder, kind) {
-  saveOrder(folder, kind, files.map((f) => f.name));
+  if (kind !== "all") { saveOrder(folder, kind, files.map(orderKey)); return; }
+  const groups = {};
+  for (const f of files) {
+    const k = (f && f.kind) || "other";
+    (groups[k] || (groups[k] = [])).push(orderKey(f));
+  }
+  for (const k of Object.keys(groups)) saveOrder(folder, k, groups[k]);
+  saveOrder(folder, "all", files.map(orderKey));   // 兼容旧键（升级前的顺序不至于丢）
 }
 
 export function createAssetsPanel(ctx) {
@@ -180,7 +217,7 @@ export function createAssetsPanel(ctx) {
       // 兜底去重：同一 rel 只留一条（否则网格出现两张一样的卡、<Picture N> 序号还会重复）
       const _seenRel = new Set();
       files = files.filter((f) => {
-        const r = (folder ? folder + "/" : "") + ((f && f.name) || "");
+        const r = recRel(folder, f);
         if (!f || !f.name || _seenRel.has(r)) return false;
         _seenRel.add(r);
         return true;
@@ -197,13 +234,19 @@ export function createAssetsPanel(ctx) {
         return;
       }
       for (const f of files) {
-        const rel = (folder ? folder + "/" : "") + f.name;
-        const url = viewUrl({ filename: f.name, subfolder: folder, type: "input" });
-        const card = h("div", { class: "mcard" + (f.kind === "image" ? "" : f.kind === "audio" ? " audio" : ""), dataset: { rel, name: f.name, kind: f.kind, idx: String(f.index || 0) } });
+        // rel/url 必须带上 kind 子目录（video/、audio/）：上传的视频音频就在子目录里
+        const rel = recRel(folder, f);
+        const url = recViewUrl(folder, f);
+        const card = h("div", { class: "mcard" + (f.kind === "image" ? "" : f.kind === "audio" ? " audio" : ""), dataset: { rel, key: orderKey(f), name: f.name, kind: f.kind, idx: String(f.index || 0) } });
         // 缩略图加载失败（源文件被删 / 脏引用）→ 隐藏破图，不留裂图占位
-        if (f.kind === "image") card.appendChild(h("div", { class: "th" }, h("img", { src: url, alt: f.name, loading: "lazy", onerror: "this.style.display='none'" })));
-        else if (f.kind === "video") card.appendChild(h("div", { class: "th" }, h("video", { src: url, muted: true, playsinline: true, preload: "metadata" })));
-        else card.appendChild(h("div", { class: "th", style: { display: "flex", alignItems: "center", justifyContent: "center" } }, h("span", { style: { fontSize: 30 } }, "🎵")));
+        if (f.kind === "image") {
+          card.appendChild(h("div", { class: "th" }, h("img", { src: url, alt: f.name, loading: "lazy", onerror: "this.style.display='none'" })));
+        } else if (f.kind === "video") {
+          // 视频缩略图：优先后端 ffmpeg 抽首帧（jpg，快且省流量）；失败则退回 <video> 取帧
+          card.appendChild(videoThumb(rel, url));
+        } else {
+          card.appendChild(audioThumb());
+        }
         card.appendChild(h("div", { class: "veil" }));
         card.appendChild(h("div", { class: "kd" }, f.kind));
         // 引用编号徽章：按 kind 前缀（Picture/Audio/Video），让用户一眼看到「这张图就是剧本里 <Picture N> 引用的那张」
@@ -236,7 +279,8 @@ export function createAssetsPanel(ctx) {
         card.appendChild(h("div", { class: "act" }, favB, renameB));
         // 提示拖拽
         card.title = `${f.name}\n（拖拽可换位 · 勾选可批量删除/收藏 · 右键可保存到本地文件夹）`;
-        card.onclick = () => { curPick = { name: f.name, rel, kind: f.kind }; renderFavBar(); if (f.kind !== "audio") lightbox(url, f.kind); };
+        // 音频以前点了没反应（只有一句 toast 让人去剪辑面板）→ 现在直接在灯箱里试听
+        card.onclick = () => { curPick = { name: f.name, rel, kind: f.kind }; renderFavBar(); lightbox(url, f.kind); };
         // 右键菜单：保存到本地文件夹（按分类）/ 在文件夹中显示 / 重命名 / 收藏 / 删除
         card.oncontextmenu = (ev) => {
           ev.preventDefault(); ev.stopPropagation();
@@ -318,7 +362,7 @@ export function createAssetsPanel(ctx) {
 
   // 指针拖拽换位：mcard 自身 pointerdown 起步，shadow root 阶段监听 move/up
   // 单次拖拽只跟一个 mcard；落点 mcard 命中就 array splice 换位 + 持久化到 LS
-  let _drag = null; // { fromName, fromIdx, pid, started, ghost, overIdx }
+  let _drag = null; // { fromKey, fromName, fromIdx, pid, started, ghost, overIdx }
   function attachDragReorder(card, f) {
     card.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
@@ -335,7 +379,7 @@ export function createAssetsPanel(ctx) {
       // 注意：不要 setPointerCapture —— ComfyUI 画布层有 `.h-full.w-full` 透明覆盖层，
       // setPointerCapture 会让所有 pointer 事件被它截走，elementFromPoint 也被它盖住 → 拖拽目标丢失
       // 改为：依赖 shadow root 上的 capture 阶段监听，所有 pointer 事件自然冒泡到那里
-      _drag = { fromName: f.name, fromIdx, pid: e.pointerId, started: false, ghost: null, overIdx: -1, startX: e.clientX, startY: e.clientY };
+      _drag = { fromKey: orderKey(f), fromName: f.name, fromIdx, pid: e.pointerId, started: false, ghost: null, overIdx: -1, startX: e.clientX, startY: e.clientY };
       e.preventDefault();
     });
   }
@@ -351,7 +395,7 @@ export function createAssetsPanel(ctx) {
       document.body.appendChild(ghost);
       _drag.ghost = ghost;
       // 标记源
-      const src = grid.querySelector(`.mcard[data-name="${CSS.escape(_drag.fromName)}"]`);
+      const src = grid.querySelector(`.mcard[data-key="${CSS.escape(_drag.fromKey)}"]`);
       if (src) src.classList.add("as-drag-src");
       // 全局光标 + 拦截 click
       document.body.style.cursor = "grabbing";
@@ -369,10 +413,10 @@ export function createAssetsPanel(ctx) {
       const mc = grid.querySelectorAll(".mcard");
       for (let i = 0; i < mc.length; i++) {
         const c = mc[i];
-        if (!c.dataset || !c.dataset.name || c.dataset.name === _drag.fromName) continue;
+        if (!c.dataset || !c.dataset.key || c.dataset.key === _drag.fromKey) continue;
         const r = c.getBoundingClientRect();
         if (mx >= r.left && mx <= r.right && my >= r.top && my <= r.bottom) {
-          const idx = files.findIndex((x) => x.name === c.dataset.name);
+          const idx = files.findIndex((x) => orderKey(x) === c.dataset.key);
           if (idx >= 0) { _drag.overIdx = idx; break; }
         }
       }
@@ -394,10 +438,10 @@ export function createAssetsPanel(ctx) {
     if (drag.overIdx < 0) return;
     // 换位（swap）：把源元素和 overIdx 处的元素互换位置
     const arr = files;
-    const fromIdx = arr.findIndex((x) => x.name === drag.fromName);
-    const targetName = files[drag.overIdx] && files[drag.overIdx].name;
-    if (fromIdx < 0 || !targetName || fromIdx === drag.overIdx) return;
-    const overIdx = arr.findIndex((x) => x.name === targetName);
+    const fromIdx = arr.findIndex((x) => orderKey(x) === drag.fromKey);
+    const targetKey = files[drag.overIdx] && orderKey(files[drag.overIdx]);
+    if (fromIdx < 0 || !targetKey || fromIdx === drag.overIdx) return;
+    const overIdx = arr.findIndex((x) => orderKey(x) === targetKey);
     if (overIdx < 0) return;
     // 直接交换两个位置的内容
     const tmp = arr[fromIdx];
