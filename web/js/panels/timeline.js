@@ -880,6 +880,21 @@ export function createTimelinePanel(ctx) {
   };
 
   // ---------- 图片九宫格 ----------
+  // 反查「这个 rel 是正文里的第几号标记」：<Picture N> / <Video N> / <Audio N>。
+  // 格子上标出编号，用户才能一眼看出"这张就是提示词里写的 2 号参考"，而不是一堆没信息的缩略图。
+  const relMarkNo = (text, kind, rel) => {
+    if (!rel) return 0;
+    try {
+      const m = (refsFromText(text).byNum || {})[kind] || {};
+      for (const k of Object.keys(m)) { if (m[k] === rel) return Number(k) || 0; }
+    } catch (_) { /* 解析失败不影响渲染 */ }
+    return 0;
+  };
+  // 只渲染「已填格 + 1 个添加位」——以前固定铺满 9/3 格，多出来的空格是**死格子**
+  // （点击只挂在"下一个空位"上，其余格子既没图标也没响应），用户实报「有些格子没用」。
+  const cellCount = (arr, cap) => Math.min(cap, (arr || []).filter(Boolean).length + 1);
+  const markLabel = (kind, n) => (kind === "video" ? "Video" : kind === "audio" ? "Audio" : "Picture");
+
   const imageGrid = (c, refreshEditor) => {
     const file = h("input", { type: "file", multiple: true, accept: "image/*", style: { display: "none" } });
     const addFiles = async (list) => {
@@ -910,13 +925,19 @@ export function createTimelinePanel(ctx) {
     const grid = h("div", { class: "mm-grid" });
     const paint = () => {
       clear(grid);
-      for (let k = 0; k < IMG_CAP; k++) {
+      const txt = String(c.prompt || "");
+      const used = c.media.image.filter(Boolean).length;
+      const n = cellCount(c.media.image, IMG_CAP);
+      for (let k = 0; k < n; k++) {
         const rel = c.media.image[k];
-        const cell = h("div", { class: "mm-cell", title: rel ? rel : "点击上传到此格" });
+        const markNo = relMarkNo(txt, "image", rel);
+        const cell = h("div", { class: "mm-cell", title: rel
+          ? `${rel}\n第 ${markNo || k + 1} 号参考图 · 正文里用 <Picture ${markNo || k + 1}> 引用\n（点击替换 · 右上角 ✕ 移除）`
+          : `点击上传 / 从素材库选 → 加为第 ${used + 1} 张参考图（正文用 <Picture ${used + 1}> 引用）` });
         if (rel) {
           // 缩略图加载失败（素材被删 / 脏引用）→ 隐藏破图
           cell.appendChild(h("img", { src: relToViewUrl(rel), onerror: "this.style.display='none'" }));
-          cell.appendChild(h("span", { class: "mm-idx" }, String(k + 1)));
+          cell.appendChild(h("span", { class: "mm-idx" }, String(markNo || k + 1)));
           cell.appendChild(h("span", { class: "mm-x", title: "移除", onclick: (ev) => { ev.stopPropagation(); c.media.image.splice(k, 1); if (!c.media.image.length) c.refsCleared = true; paint(); refreshEditor(); } }, "✕"));
           cell.onclick = () => {
             if (!confirm(`替换第 ${k + 1} 格图片？`)) return;
@@ -928,13 +949,14 @@ export function createTimelinePanel(ctx) {
             document.body.appendChild(swap); swap.click(); swap.remove();
           };
         } else {
-          cell.appendChild(h("span", { class: "mm-plus" }, k === c.media.image.length ? "＋" : ""));
-          cell.onclick = () => { if (k === c.media.image.length) file.click(); };
+          cell.appendChild(h("span", { class: "mm-plus" }, "＋"));
+          cell.onclick = () => file.click();
         }
         grid.appendChild(cell);
       }
     };
     paint();
+    grid.appendChild(file);   // 隐藏 input 必须进 DOM：游离的 file input 在部分浏览器 click() 无反应
     return h("div", { class: "col", style: { gap: 5 } },
       h("div", { class: "row", style: { gap: 6 } }, h("b", { style: { fontSize: 12 } }, "图片"),
         h("span", { class: "mm-cap" }, `${c.media.image.length}/${IMG_CAP}`), h("div", { class: "mx-spacer" }), pick, upBtn),
@@ -1024,6 +1046,7 @@ export function createTimelinePanel(ctx) {
       }
     }
     paint();
+    grid.appendChild(file);   // 同上：隐藏 input 必须进 DOM
     const filled = specs.filter((s) => c.media.image[s.slot]).length;
     return h("div", { class: "col", style: { gap: 5 } },
       h("div", { class: "row", style: { gap: 6 } },
@@ -1095,28 +1118,37 @@ export function createTimelinePanel(ctx) {
     const paint = () => {
       clear(grid);
       const arr = c.media[slot.kind];
-      for (let k = 0; k < slot.cap; k++) {
+      const txt = String(c.prompt || "");
+      const used = arr.filter(Boolean).length;
+      const n = cellCount(arr, slot.cap);
+      for (let k = 0; k < n; k++) {
         const rel = arr[k];
-        const cell = h("div", { class: "mm-cell" + (rel && isV ? " has-video" : ""), title: rel ? `${rel}
-（点击预览${isV ? "播放" : "试听"} · 右上角 × 移除）` : `点击上传${slot.label}` });
+        const markNo = relMarkNo(txt, slot.kind, rel);
+        const no = markNo || k + 1;
+        const cell = h("div", { class: "mm-cell" + (rel && isV ? " has-video" : ""), title: rel
+          ? `${rel}\n第 ${no} 号 · 正文里用 <${markLabel(slot.kind)} ${no}> 引用\n（点击预览${isV ? "播放" : "试听"} · 右上角 ✕ 移除）`
+          : `点击上传 / 从素材库选 → 加为第 ${used + 1} 个${slot.label}素材（正文用 <${markLabel(slot.kind)} ${used + 1}> 引用）` });
         if (rel) {
           const url = relToViewUrl(rel);
           const thumb = isV ? videoThumb(rel, url) : audioThumb();
           thumb.style.width = "100%"; thumb.style.height = "100%";
           cell.appendChild(thumb);
+          // 编号徽章：以前视频/音频格没有任何编号，用户看不出它对应 <Audio N>/<Video N> 几号
+          cell.appendChild(h("span", { class: "mm-idx" }, String(no)));
           cell.onclick = (ev) => {
             if (ev.target && ev.target.closest && ev.target.closest(".mm-x")) return;
             if (url) lightbox(url, slot.kind);
           };
           cell.appendChild(h("span", { class: "mm-x", title: "移除", onclick: (ev) => { ev.stopPropagation(); arr.splice(k, 1); paint(); refreshEditor(); } }, "✕"));
         } else {
-          cell.appendChild(h("span", { class: "mm-plus" }, k === arr.length ? "＋" : ""));
-          cell.onclick = () => { if (k === arr.length) up.click(); };
+          cell.appendChild(h("span", { class: "mm-plus" }, "＋"));
+          cell.onclick = () => up.click();
         }
         grid.appendChild(cell);
       }
     };
     paint();
+    grid.appendChild(up);   // 同上：隐藏 input 必须进 DOM
     return h("div", { class: "col", style: { gap: 3 } },
       h("div", { class: "row", style: { gap: 5 } },
         h("b", { style: { fontSize: 11.5 } }, slot.label),
