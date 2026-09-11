@@ -380,6 +380,7 @@ def execute_director_plan_core(
     shift_audio: float = 3.0,
     dual_clock: bool = False,
     steps_audio: int = 0,
+    attention_accel: str = "off",
     clear_vram_between_segments: bool = True,
 ) -> tuple[
     torch.Tensor,
@@ -404,6 +405,7 @@ def execute_director_plan_core(
     plan.sample_shift_audio = float(shift_audio)
     plan.sample_dual_clock = bool(dual_clock)
     plan.sample_steps_audio = int(steps_audio or 0)
+    plan.sample_attention_accel = str(attention_accel or "off")
     audio_mode = resolve_audio_mode(plan)
     decode_audio = audio_mode == AUDIO_MODE_GENERATE
     # UI toggle on the player bar (timeline.liveTaePreview); default off.
@@ -465,6 +467,20 @@ def execute_director_plan_core(
         reports.append("Live preview: OFF — 跳过 TAE 与成片 JPEG（节点内不播放）。")
     if clear_vram_between_segments:
         reports.append("VRAM: 段间清理显存已开启（最后一段不清理）。")
+    # 注意力加速：始终报一次实际生效模式（用户开没开、有没有降级都要看得见）
+    try:
+        from .attention_accel import ACCEL_OFF, availability_report, resolve_mode
+
+        _want = str(attention_accel or ACCEL_OFF).strip().lower()
+        _actual, _accel_warn = resolve_mode(_want)
+        if _want in ("", ACCEL_OFF):
+            reports.append(f"Attention: 官方 attention（加速关闭）｜{availability_report()}")
+        elif _accel_warn:
+            reports.append(f"Attention: ⚠ {_accel_warn}")
+        else:
+            reports.append(f"Attention: 加速已启用 → {_actual}｜{availability_report()}")
+    except Exception as exc:  # noqa: BLE001 - 报告绝不影响出片
+        log.warning("注意力加速可用性报告失败：%s", exc)
     if audio_mode == AUDIO_MODE_MUTE:
         reports.append("Audio: muted — skip audio VAE decode, silent AUDIO output.")
     elif audio_mode == AUDIO_MODE_SOURCE:
@@ -1040,6 +1056,7 @@ def execute_director_plan_core(
                 preview_every=1,
                 dual_clock=bool(dual_clock),
                 steps_audio=int(steps_audio or 0),
+                attention_accel=str(attention_accel or "off"),
             )
 
         first_pass_samples = samples
@@ -1159,6 +1176,7 @@ def execute_director_plan_core(
                 shift_audio=shift_audio,
                 dual_clock=bool(dual_clock),
                 steps_audio=int(steps_audio or 0),
+                attention_accel=str(attention_accel or "off"),
                 on_phase=_report_sample_phase,
                 on_step_preview=_report_step_preview if live_tae_preview else None,
                 first_pass_images=upscale_frames,

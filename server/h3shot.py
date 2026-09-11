@@ -34,8 +34,9 @@ _H3_PREFIX = "mrnext_h3shot"
 # 用户可以在画布上自己接「模型节点」和「第三方加速节点」；一旦外接，本节点的内置加速
 # 必须整体让路 —— 内置 sage / TE-Speed / 加速 LoRA 都会改写模型与噪声调度，与外部加速
 # 叠加会变成"双重加速"（调度被改两遍 → 画面发灰、显存反而爆）。
-_ACCEL_OPT_KEYS = ("sage_attention", "sparse_attention", "speed_node", "speed_mode", "speed_lora")
+_ACCEL_OPT_KEYS = ("attention_accel", "sage_attention", "sparse_attention", "speed_node", "speed_mode", "speed_lora")
 _ACCEL_OPT_LABEL = {
+    "attention_accel": "内置注意力加速",
     "sage_attention": "BlockSparse/SageAttention",
     "sparse_attention": "BlockSparse/SageAttention",
     "speed_node": "TE-Speed 加速节点",
@@ -166,6 +167,41 @@ def apply_external_accel_gate(opts):
     return o, note
 
 
+def attention_accel_probe():
+    """内置注意力加速的后端可用性探测（给前端下拉做 ⚠/✓ 提示）。
+
+    直接按文件加载 vendor 的 attention_accel 模块 —— 不走包导入，避免在
+    HTTP 请求里拉起整个 ComfyUI。返回结构永远完整；任何异常都降级成
+    「全部不可用」而不是抛错（前端只是拿它显示提示，不该因此报错）。
+
+    ⚠ **服务进程里必须跳过 GPU 张量冒烟**：此时 ComfyUI 已经持有 CUDA 上下文，
+    新起一个进程去跑冒烟会和主进程抢卡（实测直接 hang 住请求）。
+    冒烟只在真正的采样进程里跑；这里的 import + 算力范围检查足以判断
+    「装没装 / 卡支不支持」—— 真到采样时失败了也会安全回退。
+    """
+    import importlib.util
+    import os
+
+    pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(pkg, "vendor", "ComfyUI_MiniMaxH3_Director", "director", "attention_accel.py")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    spec = importlib.util.spec_from_file_location("mrnext_attention_accel", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    prev = os.environ.get("MRNEXT_ACCEL_SMOKE")
+    os.environ["MRNEXT_ACCEL_SMOKE"] = "0"
+    try:
+        info = mod.probe(force=True)
+    finally:
+        if prev is None:
+            os.environ.pop("MRNEXT_ACCEL_SMOKE", None)
+        else:
+            os.environ["MRNEXT_ACCEL_SMOKE"] = prev
+    return info
+
+
 def _glob_h3_outputs(pattern):
     """扫 SaveVideo 产物：根目录 + video/ 子目录都查（SaveVideo 无 subfolder 参数时落根目录）。"""
     out_base = folder_paths.get_output_directory()
@@ -279,13 +315,18 @@ def _apply_opts_overrides(widget, opts):
     """把 opts 里的 director 采样/输出参数覆盖到 widget。"""
     o = opts or {}
     for k in ("width", "height", "ref_max_size", "frame_rate", "total_frames",
-              "steps", "sampler", "scheduler", "shift_video", "shift_audio", "cfg"):
+              "steps", "sampler", "scheduler", "shift_video", "shift_audio", "cfg",
+              # v1.11.13 内置注意力加速（off/sage/block_sparse）—— 必须在这里白名单里，
+              # 否则前端选了也传不进节点 widget（真进图断言会挂）
+              "attention_accel", "dual_clock", "steps_audio"):
         if k in o and o[k] not in (None, ""):
             try:
-                if k in ("steps", "width", "height", "ref_max_size", "total_frames"):
+                if k in ("steps", "width", "height", "ref_max_size", "total_frames", "steps_audio"):
                     widget[k] = int(o[k])
                 elif k in ("frame_rate", "cfg", "shift_video", "shift_audio"):
                     widget[k] = float(o[k])
+                elif k == "dual_clock":
+                    widget[k] = bool(o[k])
                 else:
                     widget[k] = str(o[k])
             except Exception:  # noqa: BLE001

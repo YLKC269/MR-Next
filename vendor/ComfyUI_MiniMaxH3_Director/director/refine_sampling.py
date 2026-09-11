@@ -434,6 +434,7 @@ def apply_segment_refine(
     shift_audio: float,
     dual_clock: bool = False,
     steps_audio: int = 0,
+    attention_accel: str = "off",
     on_phase: PhaseCallback | None = None,
     on_step_preview: StepPreviewCallback | None = None,
     first_pass_images: torch.Tensor | None = None,
@@ -606,6 +607,7 @@ def apply_segment_refine(
                 apply_shift=True,
                 dual_clock=bool(dual_clock),
                 steps_audio=int(steps_audio or 0),
+                attention_accel=str(attention_accel or "off"),
             )
             last_ok = work
             if on_pass is not None:

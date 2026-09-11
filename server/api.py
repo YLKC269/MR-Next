@@ -3301,6 +3301,44 @@ async def h3_shot(req):
                   "prompt_final": prompt[:2000]})
 
 
+async def h3_attention_accel(req):
+    """GET /mrnext/h3/attention_accel —— 内置注意力加速后端可用性探测。
+
+    返回 {ok, probe:{block_sparse:{available,note,label}, sage:{...}, off:{...}, sm, triton},
+          items:[[key,label],...], report:"一行中文摘要"}
+    前端用它在「⚙ 采样设置 → 内置注意力加速」旁标 ⚠/✓，并据此提示会否自动降级。
+    探测带缓存（同进程只真跑一次冒烟），失败也返回结构完整的降级结果。
+    """
+    try:
+        # 放到线程池：探测涉及 import torch / CUDA 查询，绝不能阻塞 aiohttp 事件循环
+        info = await asyncio.get_event_loop().run_in_executor(None, h3mod.attention_accel_probe)
+        labels = {
+            "off": "关闭（官方 attention）",
+            "sage": "SageAttention（int8）",
+            "block_sparse": "官方 Block-Sparse-Attention",
+        }
+        return _json({
+            "ok": True,
+            "probe": info,
+            "items": [[k, labels[k]] for k in ("off", "sage", "block_sparse")],
+            "report": _accel_report(info),
+        })
+    except Exception as exc:  # noqa: BLE001
+        return _json({"error": f"探测失败: {exc}"}, status=500)
+
+
+def _accel_report(info):
+    """一行中文可用性摘要（与 vendor attention_accel.availability_report 同口径）。"""
+    try:
+        parts = []
+        for k, cn in (("block_sparse", "官方 Block-Sparse-Attention"), ("sage", "SageAttention（int8，已装可用）")):
+            d = (info or {}).get(k) or {}
+            parts.append(f"{cn}={'✓' if d.get('available') else '✗'}（{d.get('note', '')}）")
+        return f"GPU {(info or {}).get('sm', 'unknown')}｜" + "｜".join(parts)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 async def h3_external_nodes(req):
     """POST /mrnext/h3/external_nodes —— 扫描工作流图里的外部模型节点 / 第三方加速节点。
 
@@ -4281,6 +4319,7 @@ ROUTES = [
     ("POST", "/mrnext/editor/delete_materials", editor_delete_materials),
     ("POST", "/mrnext/h3/shot", h3_shot),
     ("POST", "/mrnext/h3/prompt_preview", h3_prompt_preview),
+    ("GET", "/mrnext/h3/attention_accel", h3_attention_accel),
     ("POST", "/mrnext/h3/external_nodes", h3_external_nodes),
     ("POST", "/mrnext/h3/dry", h3_dry),
     ("POST", "/mrnext/h3/free_vram", h3_free_vram),

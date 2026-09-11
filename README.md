@@ -1,11 +1,100 @@
 # MR分镜助手导演台 · Next — 安装流程与使用教程
 
-> 版本：**v1.11.12** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
+> 版本：**v1.11.13** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
 >
 > 官方 MiniMax H3 出片引擎已内嵌在包内，**不需要另外安装任何节点**（VOSR2 / SeedVR2 是可选增强，装了才启用）。
 
 <details open>
-<summary><b>本次更新 · v1.11.12（点开看变化）</b></summary>
+<summary><b>本次更新 · v1.11.13（点开看变化）</b></summary>
+
+**① 新增「内置注意力加速」（可选，默认关闭）**
+
+导演台 **⚙ 采样设置** 页新增 **「内置注意力加速」** 下拉，直接作用在本节点自己的采样路径上，
+**不需要在画布上外接任何加速节点**：
+
+| 选项 | 说明 | 本机 |
+|---|---|---|
+| `关闭（官方 attention）` | 默认。最稳，出片行为与以前完全一致 | ✅ |
+| `SageAttention（int8）` | H3 官方「加速版」工作流同款路径（`sageattn` int8 TensorCore） | ✅ 已装可用 |
+| `官方 Block-Sparse-Attention` | mit-han-lab 的 `block_sparse_attn_func`，128×128 块稀疏，支持 **sm_80–sm_100** | ⚠ 需本地编译 |
+
+**② 三条安全铁律（沿用双时钟的教训）**
+
+1. **默认关闭**：`attention_accel` 默认 `off`，不开就完全走官方 attention，零行为差异。
+2. **失败必回退**：所选后端不可用 / 中途抛错 → **自动降级**（`block_sparse → sage → off`）
+   并在日志与运行报告里留一条告警，**绝不中断采样、绝不影响出片**。
+3. **真探测，不猜**：后端可用性来自真实的 `import` + 算力检查 + **一次小张量冒烟**，
+   而不是"模块名在不在"。可用性结果带缓存，同进程只真跑一次。
+
+**③ 落地方式**
+
+- 后端：`vendor/ComfyUI_MiniMaxH3_Director/director/attention_accel.py`
+  —— 通过 ComfyUI 原生的 `transformer_options["optimized_attention_override"]` 通道打补丁，
+  比逐 block 改 `forward` 更轻、更不容易和别的补丁打架。
+- 探测接口：`GET /mrnext/h3/attention_accel`（前端下拉旁的 ✓/⚠ 提示）。
+- 运行报告里会打印实际生效的加速模式 + 可用性摘要，**开没开、有没有降级都看得见**。
+- 换了加速模式会变更分镜缓存 key，不会误命中旧缓存。
+
+**④ 关于 Block-Sparse-Attention（本机装不上的原因与编译指引）**
+
+这个 kernel **没有预编译轮子**（PyPI 无包、GitHub release 只有源码），必须本地编译。
+本机当前 **编译不了**，原因是 CUDA 工具链主版本不匹配：
+
+```
+RuntimeError: The detected CUDA version (12.6) mismatches the version
+that was used to compile PyTorch (13.2).
+```
+
+- 本机 `nvcc --version` = **CUDA 12.6**，而 torch = **2.12.1+cu132**（CUDA 13.2）。
+  torch 的 `cpp_extension._check_cuda_version` 里主版本不同会**直接抛错**，没有环境变量能绕过。
+- `C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/` 下只有 `v12.6`（有 nvcc）
+  和 `v13.1`（**只有 extras，没有 nvcc**）。
+
+想启用 Block-Sparse 的话，装一个 **CUDA 13.x 的完整 toolkit**（含 nvcc），然后：
+
+```bash
+git clone https://github.com/mit-han-lab/Block-Sparse-Attention
+cd Block-Sparse-Attention
+# 让 torch 找到 13.x 的 toolkit（把它放在 CUDA_PATH 或 --cuda-home 指过去）
+python setup.py install            # 或 pip install --no-build-isolation .
+```
+
+装好之后**不用改任何设置**：`/mrnext/h3/attention_accel` 的冒烟探测会自动变成 ✓，
+下拉里的 Block-Sparse 立即可选。在那之前，选它也会**自动降级到 SageAttention** 并告知原因。
+
+> 本机显卡是 **RTX 4090 Laptop（sm_89）**，在 kernel 支持的 sm_80–sm_100 范围内，
+> 所以只要编译问题解决就能用。
+
+**⑤ 修复「点面板按钮节点塌掉 / 面板崩掉」**
+
+现场：节点被压到约 **80px** 宽，面板内容横向溢出被裁切，看起来就是"崩了"。
+
+根因有两层：
+
+1. **节点尺寸锁只单向**。`main.js` 里原来的 `fixSize()` 只在 `onExecuted` 跑，
+   而且**只压回"变大"的情况**（`s[0] > W+4`）。一旦 ComfyUI 在 DOM widget 重排后
+   按 `computeSize()` 把节点**压小**，就永远修不回来 —— 面板从此一直是那条细缝。
+   现在改成 **双向钳制 + 挂到 `onResize` / `onAdded`**：宽度高度不得低于设计值
+   （1100×860），放大不干预。压小后**立刻自愈**。
+   顺带把 `node.size` 的 `defineProperty` 补上 `enumerable: true`
+   —— 不可枚举会让部分 clone/序列化路径丢掉 `size`，载入回来节点就塌了。
+
+2. **在控件的 `change` 事件里重建整个参数面板**。加速下拉原来在 `onchange` 里调了
+   `renderParam()`，而 `renderParam()` 会 `clear(paramRow)` —— 把**正在派发 change 事件的
+   那个 `<select>` 从 DOM 上摘掉**并重建整页。现在改成直接改兄弟控件的值，不重建 DOM。
+
+**⑥ 布局修复：auto-fill 网格里不再写死 `gridColumn: "span N"`**
+
+`.tl-paramrow` 是 `repeat(auto-fill, minmax(148px, 1fr))`，**列数随容器宽度变**。
+写死 `span 3` / `span 6` 会在窄容器下强行撑出 3/6 列 → 网格比容器宽 → 横向溢出被裁切。
+已全部改为 `1 / -1`（跨满实际列数，永不撑列）。
+新增的加速状态备注也改成和下拉**同一个 cell**，不再单独占一个网格单元。
+实测：节点 420px 宽时参数网格横向溢出 **0px**（修复前会撑出 6 列）。
+
+</details>
+
+<details>
+<summary><b>上一版 · v1.11.12（点开看变化）</b></summary>
 
 **① 修复「完全出不了片」：T8 双时钟不再阻断采样**
 

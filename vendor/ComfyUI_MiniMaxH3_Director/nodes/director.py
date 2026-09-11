@@ -153,6 +153,25 @@ class MiniMaxH3Director:
                         ),
                     },
                 ),
+                "attention_accel": (
+                    (
+                        "off",
+                        "sage",
+                        "block_sparse",
+                    ),
+                    {
+                        "default": "off",
+                        "tooltip": (
+                            "注意力加速（可选，默认关闭，不影响出片稳定性）。\n"
+                            "off = 官方 attention（最稳）。\n"
+                            "sage = SageAttention int8（H3 官方「加速版」工作流同款）。\n"
+                            "block_sparse = 官方 Block-Sparse-Attention（需本地编译，"
+                            "kernel 支持 sm_80–sm_100）。\n"
+                            "所选后端不可用 / 中途抛错 → 自动降级（block_sparse→sage→off）"
+                            "并回退官方 attention，只在日志留一条告警。"
+                        ),
+                    },
+                ),
                 "steps_audio": (
                     "INT",
                     {
@@ -251,6 +270,7 @@ class MiniMaxH3Director:
         shift_audio=3.0,
         dual_clock=False,
         steps_audio=0,
+        attention_accel="off",
         clear_vram_between_segments=True,
         export_source_images=False,
         **kwargs,
@@ -291,6 +311,7 @@ class MiniMaxH3Director:
                     shift_audio=shift_audio,
                     dual_clock=dual_clock,
                     steps_audio=steps_audio,
+                    attention_accel=attention_accel,
                     clear_vram_between_segments=clear_vram_between_segments,
                 )
             )

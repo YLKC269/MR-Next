@@ -148,6 +148,7 @@ def sample_single_stage(
     apply_shift: bool = True,
     dual_clock: bool = False,
     steps_audio: int = 0,
+    attention_accel: str = "off",
 ):
     import torch
     from comfy_extras.nodes_custom_sampler import (
@@ -165,6 +166,25 @@ def sample_single_stage(
 
     notify(phase_name, 0)
     model_use = model
+
+    # ── 注意力加速（可选，默认 off）──
+    # Block-Sparse-Attention / SageAttention 补丁在采样前打到 model 上。
+    # 走 `optimized_attention_override` 通道，失败一律静默回退官方 attention
+    # （见 attention_accel.patch_model 的 fail-open 契约），绝不阻断出片。
+    _accel_note = ""
+    try:
+        from .attention_accel import ACCEL_OFF, patch_model, resolve_mode
+
+        want = str(attention_accel or ACCEL_OFF).strip().lower()
+        if want and want != ACCEL_OFF:
+            actual, _accel_note = resolve_mode(want)
+            if _accel_note:
+                log.warning("H3 注意力加速：%s", _accel_note)
+            if actual != ACCEL_OFF:
+                model_use = patch_model(model_use, actual)
+                log.info("H3 注意力加速已启用：%s", actual)
+    except Exception as exc:  # noqa: BLE001 - 加速绝不能阻断出片
+        log.warning("H3 注意力加速装配失败，按官方 attention 运行：%s", exc)
 
     # ── 采样路径分流 ──
     # **默认走官方单时钟**（`MiniMaxH3SigmaShift` → BasicScheduler → …），这是唯一
@@ -229,8 +249,10 @@ def sample_single_stage(
         if apply_shift:
             from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
 
+            # 注意：用 model_use（已打注意力加速补丁）而不是 model ——
+            # SigmaShift 会 clone model，clone 保留 model_options，补丁得以透传。
             shifted = MiniMaxH3SigmaShift.execute(
-                model, float(shift_video), float(shift_audio)
+                model_use, float(shift_video), float(shift_audio)
             )
             model_use = _unpack_node_output(shifted)[0]
 

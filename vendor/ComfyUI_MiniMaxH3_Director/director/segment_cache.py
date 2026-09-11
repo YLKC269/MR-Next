@@ -149,6 +149,8 @@ def first_pass_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[s
         # 双时钟：换了采样时钟/音频步数 → 产物不同，缓存必须失效。
         "dual_clock": bool(getattr(plan, "sample_dual_clock", False)),
         "steps_audio": int(getattr(plan, "sample_steps_audio", 0) or 0),
+        # 加速改变了 attention 数值路径 → 必须进 key，否则换了加速模式会命中旧缓存
+        "attention_accel": str(getattr(plan, "sample_attention_accel", "off") or "off"),
     })
     if linked:
         fp["steps"] = 0

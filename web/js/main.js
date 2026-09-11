@@ -4,7 +4,7 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { mountApp } from "./app.js";
 
-const MRNEXT_VERSION = "1.11.12"; // 改这个就能让你 Ctrl+F5 后用右键"检查"看 widget header 是不是新版本
+const MRNEXT_VERSION = "1.11.13"; // 改这个就能让你 Ctrl+F5 后用右键"检查"看 widget header 是不是新版本
 console.log("[MRBoardNext] extension loaded · v" + MRNEXT_VERSION);
 
 app.registerExtension({
@@ -37,6 +37,8 @@ function mountStudioNode(node) {
       value: [W, H],
       writable: true,
       configurable: true,
+      // 必须可枚举：否则 clone / 部分序列化路径会把 size 丢掉 → 工作流载回来节点塌成一条
+      enumerable: true,
     });
   } catch (_) {}
   if (node.setSize) {
@@ -44,6 +46,42 @@ function mountStudioNode(node) {
       node.setSize([W, H]);
     } catch (_) {}
   }
+
+  // ── 尺寸保底锁（双向）──
+  // 现场：用户点面板上的按钮后节点被压到 ~80px 宽，内容横向溢出被裁切（"面板崩掉"）。
+  // 原因是 ComfyUI 在 DOM widget 重排后会按 computeSize() 回写 node.size，而旧的
+  // fixSize() 只在 onExecuted 跑、且**只压回变大的情况** → 被压小就永久坏掉。
+  // 这里只做"保底"：宽度/高度不得低于设计值；放大（用户手动拉大）不干预。
+  const lockSize = () => {
+    if (node.__mrnextLocking) return; // 递归守卫：setSize 会同步回调 onResize
+    try {
+      const s = node.size || [W, H];
+      const w0 = Number(s[0]) || 0;
+      const h0 = Number(s[1]) || 0;
+      const w = Math.max(w0, W);
+      const h = Math.max(h0, H);
+      if (w !== w0 || h !== h0) {
+        node.__mrnextLocking = true;
+        try { node.setSize([w, h]); } catch (_) {}
+        node.__mrnextLocking = false;
+      }
+    } catch (_) { node.__mrnextLocking = false; }
+  };
+  node.__mrnextLockSize = lockSize;
+  try {
+    const origOnResize = node.onResize;
+    node.onResize = function () {
+      try { if (origOnResize) origOnResize.apply(this, arguments); } catch (_) {}
+      lockSize();
+    };
+  } catch (_) {}
+  try {
+    const origOnAdded = node.onAdded;
+    node.onAdded = function () {
+      try { if (origOnAdded) origOnAdded.apply(this, arguments); } catch (_) {}
+      setTimeout(lockSize, 0);
+    };
+  } catch (_) {}
 
   const host = document.createElement("div");
   host.style.cssText = "width:100%;height:100%;";
@@ -119,12 +157,18 @@ function installNoNativePreview(node) {
   const fixSize = () => {
     try {
       const s = node.size || [W, H];
-      // 只压回"被预览撑高"的情况，不动用户手动改宽的意图
-      if (s[1] > H + 4 || s[0] > W + 4) node.setSize([Math.max(s[0], 0) > W ? s[0] : W, H]);
+      const w0 = Number(s[0]) || 0;
+      const h0 = Number(s[1]) || 0;
+      // 高度：一律回到设计高（原生预览会把它撑高）
+      // 宽度：不低于设计宽（保留用户手动加宽的意图）；
+      //   ★ 同时救回"被压小"的情况 —— 旧逻辑只处理 s[0] > W+4，节点被压塌后永远修不回来。
+      const w = Math.max(w0, W);
+      const h = H;
+      if (w !== w0 || h !== h0) node.setSize([w, h]);
     } catch (_) {}
   };
 
-  const fixAll = () => { strip(); fixSize(); };
+  const fixAll = () => { strip(); fixSize(); if (node.__mrnextLockSize) node.__mrnextLockSize(); };
 
   try {
     node.setSizeForImage = function () { /* 禁用：不许因预览撑高节点 */ };

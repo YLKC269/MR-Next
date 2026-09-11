@@ -48,6 +48,8 @@ const DEFAULT_PARAMS = () => ({
   mode: "t2v",
   model: { unet: "", clip: "", vvae: "", avae: "", lora: "(无)", loraS: 1, autoUnet: true },
   speed: { node: "off", dev: "auto", lora: "(无)", loraS: 1, sage: "disabled", free_vram: true,
+           // 内置注意力加速：off / sage / block_sparse（不需要外接节点；不可用时后端自动降级）
+           accel: "off", accelInfo: null,
            // 外部节点接口：external = 画布上检测到的第三方加速类型（非空 → 内置加速自动失效）
            external: [], forceBuiltin: false, extInfo: null },
   output: {
@@ -721,18 +723,18 @@ export function createTimelinePanel(ctx) {
       row.append(
         structCk,
         field("台词语言", langE, "av_lang（台词用 [语言] 包裹，绝不用双引号）"),
-        h("div", { class: "tl-field", style: { gridColumn: "span 3" } },
+        h("div", { class: "tl-field", style: { gridColumn: "1 / -1" } },
           h("div", { class: "tl-flabel", title: "overall_soundscape" }, "环境音（overall_soundscape）"),
           ambE),
-        h("div", { class: "tl-field", style: { gridColumn: "span 3" } },
+        h("div", { class: "tl-field", style: { gridColumn: "1 / -1" } },
           h("div", { class: "tl-flabel", title: "non_diegetic_music" }, "画外配乐（non_diegetic_music）"),
           musE),
         field("音频模式", amodeWrap, "timeline_data.output.audioMode"),
         guardCk,
         field("护栏最低步数", minStepE, "audio_min_steps"),
-        h("div", { class: "tl-field", style: { gridColumn: "span 2" } }, pvBtn),
-        h("div", { class: "tl-field", style: { gridColumn: "span 6" } }, warn),
-        h("div", { class: "tl-field", style: { gridColumn: "span 6" } },
+        h("div", { class: "tl-field", style: { gridColumn: "1 / -1" } }, pvBtn),
+        h("div", { class: "tl-field", style: { gridColumn: "1 / -1" } }, warn),
+        h("div", { class: "tl-field", style: { gridColumn: "1 / -1" } },
           h("div", { class: "muted", style: { fontSize: 10.5, lineHeight: 1.6, opacity: 0.85 } },
             "说话人编号 (S1)/(S2) 由「公共前缀」里的角色顺序自动分配，同一角色跨镜头同号（音色不串）。台词请写成「角色名：台词」或「角色名说：台词」；无台词时会自动声明 No dialogue，防止模型乱配音。")));
     } else if (key === "speed") {
@@ -755,6 +757,57 @@ export function createTimelinePanel(ctx) {
       ];
       const sageE = sel(SAGE_MODES.map((m) => m[0]), P.speed.sage || "disabled");
       sageE.onchange = () => { P.speed.sage = sageE.value; };
+      // 内置注意力加速（直连本节点采样路径，不需要外接节点）
+      //   off          = 官方 attention（默认，最稳）
+      //   sage         = SageAttention int8（H3 官方「加速版」工作流同款）
+      //   block_sparse = 官方 Block-Sparse-Attention（需本地编译；sm_80–sm_100）
+      // 后端不可用/抛错 → 自动降级（block_sparse→sage→off），绝不阻断出片。
+      const ACCEL_MODES = [
+        ["off", "关闭（官方 attention）"],
+        ["sage", "SageAttention（int8）"],
+        ["block_sparse", "官方 Block-Sparse-Attention"],
+      ];
+      const accelE = sel(ACCEL_MODES.map((m) => m[0]), P.speed.accel || "off");
+      const accelNote = h("span", { class: "muted", style: { fontSize: 10.5, opacity: 0.85,
+        minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
+      // 备注和下拉放**同一个 cell**：不再单独占一个网格单元，也不用 gridColumn:"span N"
+      //   —— auto-fill 网格里写死 span 会在窄容器下强行撑出列 → 横向溢出被裁切。
+      const accelCell = h("div", { style: { display: "flex", alignItems: "center", gap: 5,
+        minWidth: 0, flexWrap: "wrap" } }, accelE, accelNote);
+      const syncAccelNote = () => {
+        const v = P.speed.accel || "off";
+        const inf = P.speed.accelInfo;
+        if (v === "off") { accelNote.textContent = ""; accelNote.title = ""; return; }
+        if (inf && inf[v] && !inf[v].available) {
+          accelNote.textContent = "⚠ 本机不可用 → 将自动降级";
+          accelNote.title = inf[v].note || "";
+        } else if (inf && inf[v] && inf[v].available) {
+          accelNote.textContent = "✓ 可用";
+          accelNote.title = inf[v].note || "";
+        } else { accelNote.textContent = ""; accelNote.title = ""; }
+      };
+      accelE.onchange = () => {
+        P.speed.accel = accelE.value;
+        // 选了内置加速就把「外接 BlockSparse 节点」关掉（两条路径叠加会双重改调度）。
+        // ⚠ 这里**绝不能调 renderParam()** —— 它会 clear(paramRow) 把当前正在派发
+        //   change 事件的这个 <select> 从 DOM 上摘掉并重建整页 → 面板错乱/崩掉。
+        //   直接把兄弟控件的值改掉即可，重建 DOM 对一次赋值毫无必要。
+        if (accelE.value !== "off" && sageE.value && sageE.value !== "disabled") {
+          P.speed.sage = "disabled";
+          sageE.value = "disabled";
+        }
+        syncAccelNote();
+      };
+      syncAccelNote();
+      // 探测后端可用性（纯提示；失败静默；api 可能不存在 —— 绝不能拖垮整页渲染）
+      try {
+        const _fn = ctx.api && ctx.api.attentionAccel;
+        if (typeof _fn === "function") {
+          _fn.call(ctx.api).then((r) => {
+            if (r && r.ok && r.probe) { P.speed.accelInfo = r.probe; syncAccelNote(); }
+          }).catch(() => {});
+        }
+      } catch (_) {}
       const freeCk = h("label", { class: "row", style: { gap: 5, cursor: "pointer", padding: "4px 6px" } },
         h("input", { type: "checkbox", checked: P.speed.free_vram ? "checked" : null, onchange: (e) => { P.speed.free_vram = e.target.checked; }, style: { accentColor: "#ffd166" } }),
         h("span", { style: { fontSize: 11.5, color: "#bcd3ea" }, title: "整条连跑时每 2 镜自动清理显存缓存，防止长时间连续出片显存累积 OOM" }, "段间清理显存（每2镜）"));
@@ -837,10 +890,11 @@ export function createTimelinePanel(ctx) {
         } }, "🔗 扫描画布外部节点");
       renderExt(P.speed.extInfo);
       row.append(
-        h("div", { class: "tl-field", style: { gridColumn: "span 6", display: "flex", flexDirection: "column", gap: 6 } },
+        h("div", { class: "tl-field", style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 } },
           h("div", { class: "tl-flabel", title: "外部模型节点 / 第三方加速节点接口：外接后内置加速自动失效" }, "外部节点（模型 / 加速）"),
           h("div", { class: "row", style: { gap: 8, flexWrap: "wrap", alignItems: "center" } }, scanBtn, forceCk, extLbl),
           extBox),
+        field("内置注意力加速", accelCell, "attention_accel"),
         field("BlockSparse 加速", sageE, "PathchSageAttentionKJ"),
         field("TE-Speed 模式", speedE, "TESpeedMiniMaxH3"),
         field("TE-Speed 设备", devE, "device"),
@@ -1368,6 +1422,8 @@ export function createTimelinePanel(ctx) {
       speed_lora: P.speed.lora && P.speed.lora !== "(无)" ? P.speed.lora : undefined,
       speed_lora_strength: P.speed.loraS,
       sage_attention: P.speed.sage !== "disabled" ? P.speed.sage : undefined,
+      // 内置注意力加速（off / sage / block_sparse）—— 直接进本节点采样路径，不需要外接节点
+      attention_accel: (P.speed.accel && P.speed.accel !== "off") ? P.speed.accel : "off",
       // 外部节点接口：非空 = 画布上外接了第三方加速 → 后端让内置加速失效（双保险）
       external_accel: (P.speed.external && P.speed.external.length) ? P.speed.external : undefined,
       force_builtin_accel: P.speed.forceBuiltin ? true : undefined,

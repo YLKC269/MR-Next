@@ -240,6 +240,8 @@ class DirectorPlan:
     # 音频被视频的粗步长拉爆 → 爆音/白噪声。steps_audio=0 表示跟随视频步数。
     sample_dual_clock: bool = False
     sample_steps_audio: int = 0
+    # 注意力加速模式（off / sage / block_sparse）；不可用时采样期自动降级
+    sample_attention_accel: str = "off"
     # 输出端音频完整性审计结果（只报告）：schema/checked/hard_finding_codes 等。
     audio_integrity: dict = None
 

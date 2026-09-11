@@ -142,6 +142,8 @@ export const StudioAPI = {
   h3PromptPreview: (payload) => postJson("/mrnext/h3/prompt_preview", payload),
   // 扫描工作流图里的「外部模型节点 / 第三方加速节点」（外接加速 → 内置加速自动失效）
   externalNodes: (graph) => postJson("/mrnext/h3/external_nodes", { graph }),
+  // 内置注意力加速后端可用性（Block-Sparse / SageAttention）—— 前端用来标 ✓/⚠
+  attentionAccel: () => getJson("/mrnext/h3/attention_accel"),
   h3FreeVram: () => postJson("/mrnext/h3/free_vram", {}),
   h3Upscale: (rel, engine, opts) => postJson("/mrnext/h3/upscale_video", { rel, engine, ...(opts || {}) }),
   h3UpscaleStatus: (taskId) => getJson(`/mrnext/h3/upscale_status?task_id=${encodeURIComponent(taskId)}`),
