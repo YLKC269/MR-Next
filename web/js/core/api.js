@@ -134,6 +134,8 @@ export const StudioAPI = {
   dedupeMaterials: (folder) => postJson("/mrnext/editor/dedupe", { folder }),
   deleteMaterials: (rels) => postJson("/mrnext/editor/delete_materials", { rels }),
   analyze: (texts, candidates) => postJson("/mrnext/studio/analyze", { texts, candidates }),
+  // 旧包同款「匹配素材并引用」：按文件名关键词匹配 → 返回带 <Picture/Audio/Video N> 的正文
+  assetMatch: (payload) => postJson("/mrnext/studio/asset_match", payload),
   mediaExists: (rels) => postJson("/mrnext/media/exists", { rels }),
   h3Shot: (payload) => postJson("/mrnext/h3/shot", payload),
   // 不出片，只回显 H3 官方三段式组装后的提示词（确认台词识别是否正确）

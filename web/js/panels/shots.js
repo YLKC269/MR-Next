@@ -352,16 +352,71 @@ export function createShotsPanel(ctx) {
     }
   };
 
+  /* 🎯 匹配素材并引用（旧包「匹配引用」同款）
+     旧包语义：候选 = 「N=文件名」引用表 → 素材库/收藏；关键词 = 文件名去后缀；
+     在正文命中的关键词**后面**插入 <Picture N>/<Audio N>/<Video N>；写回正文。
+     本包增强：候选也吃素材库索引（含 video/audio 子目录），并按素材自身 kind 归类。 */
   const matchBtn = h(
     "button",
     {
       class: "btn",
-      title: "按收藏库名字/文件名匹配每镜素材（语义匹配，与旧包「匹配引用」同款）",
+      title: "按素材文件名关键词匹配每镜并插入 <Picture/Audio/Video N>（旧包「匹配引用」同款，会写回正文）",
       onclick: async () => {
         const shots = s.get().shots || [];
         if (!shots.length) { ctx.toast("请先拆分分镜", true); return; }
         matchBtn.disabled = true;
         matchBtn.textContent = "匹配中…";
+        try {
+          const cands = await loadFavs();
+          const res = await ctx.api.assetMatch({
+            texts: shots.map((sh) => sh.text || ""),
+            markers: shots.map((sh) => sh.marker || ""),
+            folder: s.get().folder || "mrboard_next",
+            imgRef: s.get().imgRef || "",
+            audRef: s.get().audRef || "",
+            vidRef: s.get().vidRef || "",
+            candidates: cands || [],
+            apply: true,
+          });
+          const mods = res.modifiedTexts || [];
+          if (!mods.length) { ctx.toast("没有可匹配的素材", true); return; }
+          // 写回正文（保留 marker/sec/linkNext 等其它字段）
+          const next = shots.map((sh, i) => (
+            typeof mods[i] === "string" && mods[i] !== (sh.text || "")
+              ? { ...sh, text: mods[i], prompt: mods[i] }
+              : sh
+          ));
+          const inserted = (res.stats && res.stats.inserted) || 0;
+          const un = res.unmatched || [];
+          // refMap 也要跟着重算（时间线按 refMap 自动导入素材；标记插完后必须同步）
+          const rm = (s.get().refMap || []).slice();
+          (res.perShot || []).forEach((arr, i) => { rm[i] = Array.isArray(arr) ? arr : []; });
+          s.set({ shots: next, refMap: rm, splitStamp: Date.now() });
+          const miss = un.length ? `；未匹配 ${un.length}：${un.slice(0, 4).map((u) => `${u.fileName}（${u.reason}）`).join("、")}${un.length > 4 ? "…" : ""}` : "";
+          ctx.toast(`✓ 已插入 ${inserted} 个引用标记${miss}`, un.length > 0 && inserted === 0);
+          render();
+        } catch (e) {
+          ctx.toast("匹配失败: " + e.message, true);
+        } finally {
+          matchBtn.disabled = false;
+          matchBtn.textContent = "🎯 匹配素材并引用";
+        }
+      },
+    },
+    "🎯 匹配素材并引用"
+  );
+
+  /* 🔍 语义匹配（按收藏名匹配，只算命中不插入标记）—— 保留给「角色名已在正文里」的场景 */
+  const analyzeBtn = h(
+    "button",
+    {
+      class: "btn",
+      title: "按收藏库名字匹配每镜（语义匹配，只算命中不插入标记）",
+      onclick: async () => {
+        const shots = s.get().shots || [];
+        if (!shots.length) { ctx.toast("请先拆分分镜", true); return; }
+        analyzeBtn.disabled = true;
+        analyzeBtn.textContent = "匹配中…";
         try {
           const cands = await loadFavs();
           if (!cands.length) { ctx.toast("收藏库为空 —— 先在「素材库」收藏角色/场景素材", true); return; }
@@ -376,12 +431,12 @@ export function createShotsPanel(ctx) {
         } catch (e) {
           ctx.toast("匹配失败: " + e.message, true);
         } finally {
-          matchBtn.disabled = false;
-          matchBtn.textContent = "🔍 匹配引用";
+          analyzeBtn.disabled = false;
+          analyzeBtn.textContent = "🔍 语义匹配";
         }
       },
     },
-    "🔍 匹配引用"
+    "🔍 语义匹配"
   );
 
   const saveBtn = h(
@@ -409,7 +464,7 @@ export function createShotsPanel(ctx) {
 
   const el = h("div", { class: "col" },
     h("div", { class: "card", style: { display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" } },
-      autoDurBtn, unifyDurBtn, applyBtn, matchBtn, saveBtn, clearBtn,
+      autoDurBtn, unifyDurBtn, applyBtn, matchBtn, analyzeBtn, saveBtn, clearBtn,
       h("div", { class: "mx-spacer" }),
       stat),
     wrap);

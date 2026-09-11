@@ -50,6 +50,11 @@ _KIND_EXTS = {
 
 _TAG_RE = re.compile(r"<(Picture|Video|Audio|Subject)\s+(\d+)\s*>")
 
+# ⚠ 名字/关键词匹配的「左邻边界」一律用这个 ASCII 判定，**不要用 str.isalnum()**：
+#   中文汉字的 isalnum() 也是 True —— "在废弃仓库门口" 的 "在" 会被当成字母 →
+#   中文名几乎永远匹配不上（本包实际踩过：素材名匹配只命中句首那一个）。
+_ASCII_ALNUM_RE = re.compile(r"[A-Za-z0-9]")
+
 
 # ---- 虚拟引用 token 净化（与前端 core/purify.js 同名同语义）----
 # ComfyUI 前端在文本域粘贴图片时会写入 `@image#N:文件名.png` 引用标记（不是磁盘真实文件）。
@@ -1226,7 +1231,9 @@ def _scan_per_shot_refs(bodies, folder, tagBindings=None, roleImages=None, prefi
             hit = False
             for mm in re.finditer(re.escape(name), b or ""):
                 st = mm.start()
-                if st > 0 and (b or "")[st - 1].isalnum():
+                # ⚠ 只挡 ASCII 字母数字：str.isalnum() 对中文汉字也是 True，
+                #    "在石室里" 的 "在" 会把「石室」判成嵌词 → 中文名几乎永远匹配不上。
+                if st > 0 and _ASCII_ALNUM_RE.match((b or "")[st - 1]):
                     continue
                 seg = (b or "")[st: st + 12]
                 if any(seg.startswith(l) for l in longer):
@@ -2647,12 +2654,412 @@ async def studio_import_folder(req):
                   "names": copied[:40]})
 
 
+# ---------- 素材引用匹配（对齐旧包 director/studio_routes.py）----------
+# 旧包语义（权威参考）：
+#   · 候选来自「N=文件名」引用表（parse_ref_mapping，无序号行从 1 自动编号）
+#   · 搜索关键词 = 文件名去扩展名 + 去常见后缀（配音/三视图/角色卡/场景概念图/概念图/场景图/场景）
+#   · 逐镜扫关键词 → **在命中关键词之后插入** `<Picture N>` / `<Audio N>` / `<Video N>`
+#   · 跳过正文里已存在的同类标签、遵守 LIMITS 上限、返回 unmatched（带原因）
+# 本包在此基础上补两点：
+#   ① 候选可来自素材库索引（不只引用表），并按素材自身 kind 归类（否则视频/音频名会被塞进图片格）
+#   ② 插入的位置收集成区间，一次写回，避免多镜/多标签互相错位
+
+# 文件名里的常见修饰后缀（旧包 _search_key 同源）
+_ASSET_NAME_SUFFIXES = ("配音", "三视图", "角色卡", "场景概念图", "概念图", "场景图", "场景")
+# 正文里已存在的引用标签（用于去重，与旧包 _EXISTING_TAG_RE 同源）
+_REF_TAG_ANY_RE = re.compile(r"<(?:Picture|Video|Audio|Subject)\s+\d+\s*>", re.IGNORECASE)
+_REF_TAG_KIND_RE = {
+    "image": re.compile(r"<(?:Picture|Subject)\s+(\d+)\s*>", re.IGNORECASE),
+    "audio": re.compile(r"<Audio\s+(\d+)\s*>", re.IGNORECASE),
+    "video": re.compile(r"<Video\s+(\d+)\s*>", re.IGNORECASE),
+}
+_REF_LIMITS = {"image": 9, "audio": 3, "video": 3}
+_TAG_FMT = {"image": "<Picture {}>", "audio": "<Audio {}>", "video": "<Video {}>"}
+
+
+def search_key_of(name):
+    """从素材文件名提取搜索关键词：去扩展名 + 去常见修饰后缀（旧包 _search_key 同款）。"""
+    base = os.path.splitext(os.path.basename(str(name or "")))[0]
+    for sfx in _ASSET_NAME_SUFFIXES:
+        if sfx in base:
+            base = base.replace(sfx, "")
+    return base.strip()
+
+
+def parse_ref_mapping(text):
+    """解析「N=文件名」引用表；不带序号的行按出现顺序从 1 自动编号（旧包同款）。"""
+    mapping = {}
+    auto = 0
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            try:
+                idx = int(k.strip())
+            except ValueError:
+                continue
+            name = v.strip()
+        else:
+            auto += 1
+            idx = auto
+            name = line
+        if name and idx >= 1:
+            mapping[idx] = name
+    return mapping
+
+
+def _is_machine_asset_name(name):
+    """ComfyUI 机器文件名（1788948454574_aeb7332f_00001_.png）——不参与正文关键词匹配。"""
+    stem = re.sub(r"\.[^.]+$", "", str(name or "")).strip()
+    if not stem:
+        return True
+    segs = [s for s in stem.split("_") if s]
+    if not segs:
+        return True
+
+    def _machine_seg(s):
+        return bool(re.fullmatch(r"\d+", s)) or bool(re.fullmatch(r"[0-9a-fA-F]{6,}", s))
+
+    return all(_machine_seg(s) for s in segs)
+
+
+def _collect_match_cands(body, folder):
+    """收集候选项，按 kind 分组，每项 {num, key, name, rel, kind, src}。
+
+    优先级（高 → 低，同 kind 内 num 小的先匹配）：
+      ① 显式引用表 imgRef/audRef/vidRef 的 `N=文件名` 行（旧包 parse_ref_mapping）——
+         num 就是用户指定的编号，插入 `<Picture num>`；
+      ② 前端送的 candidates（收藏库/素材库条目，带 rel）—— num 用素材库 index 或顺序补位；
+      ③ 素材库索引（_list_files）—— 兜底，让「上传了但没收藏」的素材也能被匹配到。
+    """
+    rels = {k: _list_files(folder, k) for k in ("image", "audio", "video")}
+    # rel → 记录（用于回查编号）
+    by_rel = {}
+    for k, items in rels.items():
+        for it in items:
+            by_rel[(k, rel_of_file(folder, it))] = it
+            by_rel[(k, it.get("name"))] = it
+
+    out = {k: [] for k in ("image", "audio", "video")}
+    seen = {k: set() for k in ("image", "audio", "video")}
+
+    def _push(kind, num, name, rel, src):
+        if kind not in out:
+            return
+        nm = os.path.basename(str(name or "").strip())
+        if not nm:
+            return
+        key = search_key_of(nm)
+        ident = (str(rel or ""), nm)
+        if ident in seen[kind]:
+            return
+        seen[kind].add(ident)
+        out[kind].append({"num": int(num) if num else 0, "key": key,
+                          "name": nm, "rel": str(rel or "").replace("\\", "/"),
+                          "kind": kind, "src": src})
+
+    # ① 显式引用表
+    _SRC = {"image": "imgRef", "audio": "audRef", "video": "vidRef"}
+    for kind, field in _SRC.items():
+        for num, name in sorted(parse_ref_mapping(body.get(field)).items()):
+            hit = by_rel.get((kind, os.path.basename(name)))
+            rel = rel_of_file(folder, hit) if hit else ""
+            _push(kind, num, name, rel, "refmap")
+
+    # ② 前端 candidates（收藏库 / 素材库）
+    cands = body.get("candidates")
+    if isinstance(cands, list):
+        # 素材库编号：用于给没有显式编号的候选分配 N（保持「提示词第 k 号 ↔ 素材库第 k 个」）
+        next_num = {k: max([c["num"] for c in out[k]] or [0]) for k in out}
+        for c in cands:
+            if not isinstance(c, dict):
+                continue
+            nm = str(c.get("name") or "").strip()
+            if not nm:
+                continue
+            rel = str(c.get("rel") or "").replace("\\", "/")
+            kind = str(c.get("kind") or "").lower()
+            if kind not in out:
+                kind = _kind_of(nm)
+            if kind not in out:
+                continue
+            # 优先用素材库记录里的 index（与前端 fileByIndex 同一套编号）
+            hit = by_rel.get((kind, rel)) or by_rel.get((kind, nm))
+            num = (hit or {}).get("index") or 0
+            if not num:
+                next_num[kind] += 1
+                num = next_num[kind]
+            _push(kind, num, nm, rel or (rel_of_file(folder, hit) if hit else ""), "cand")
+
+    # ③ 素材库索引兜底：**只对图片**自动扫正文关键词。
+    #    音频/视频**不**做自动关键词匹配 —— 否则「云妙衣配音.wav」会把角色名当关键词，
+    #    在 <Picture 1> 旁边粘一个 <Audio 1>（用户实报「完美匹配」要求下这属于误插）。
+    #    图/音/视频要显式引用，走 ①「N=文件名」引用表或 ② 收藏库。
+    for kind in ("image",):
+        for it in rels.get(kind) or []:
+            _push(kind, it.get("index") or 0, it.get("name"), rel_of_file(folder, it), "lib")
+
+    return out
+
+
+def _analyze_one_shot_match(text, cands_by_kind):
+    """单镜匹配：返回 (新增标签列表, 已命中集, 插入点列表)。
+
+    命中判定与旧包一致：关键词（含「左不邻字母数字 + 不落在更长关键词里」边界）出现在正文里。
+    插入位置 = 命中关键词的**末尾**（旧包 `pos + len(keyword)`），保证标签紧跟在名字后面。
+    """
+    body_text = str(text or "")
+    low = body_text.lower()
+    existing = set(_REF_TAG_ANY_RE.findall(body_text))
+    existing_low = {t.lower() for t in existing}
+    new_tags = []
+    matched = set()
+    inserts = []  # (pos, tag)
+    counts = {k: 0 for k in _REF_LIMITS}
+    # 已占用的编号（同 kind 内）—— 避免两个不同素材挤进同一个槽
+    used_nums = {k: set() for k in _REF_LIMITS}
+    for kind in ("image", "audio", "video"):
+        for m in _REF_TAG_KIND_RE[kind].finditer(body_text):
+            used_nums[kind].add(int(m.group(1)))
+
+    # 图片/视频：在命中关键词**之后**插入标签（旧包语义）。
+    for kind in ("image", "video"):
+        # 长关键词优先（"云妙衣" 不会被 "云" 之类的短词截胡）
+        items = sorted(cands_by_kind.get(kind) or [], key=lambda x: (-len(x.get("key") or ""), x.get("num") or 0))
+        for c in items:
+            key = str(c.get("key") or "")
+            num = int(c.get("num") or 0)
+            tag = _TAG_FMT[kind].format(num)
+            if num >= 1 and tag.lower() in existing_low:
+                matched.add((kind, num))
+                continue
+            if counts[kind] >= _REF_LIMITS[kind]:
+                continue
+            if not key or not _usable_rel(c.get("rel")):
+                continue
+            if num in used_nums[kind]:
+                # 槽位被别的素材占了 → 找下一个空号（保住"编号不重复"）
+                nxt = 1
+                while nxt in used_nums[kind] or nxt > _REF_LIMITS[kind]:
+                    nxt += 1
+                if nxt > _REF_LIMITS[kind]:
+                    continue
+                num = nxt
+                tag = _TAG_FMT[kind].format(num)
+            pos = _find_keyword_pos(body_text, key, [x.get("key") for x in items])
+            if pos < 0:
+                continue
+            new_tags.append({"kind": kind, "index": num - 1, "fileName": c.get("name"),
+                             "keyword": key, "tag": tag,
+                             "rel": c.get("rel"), "num": num})
+            counts[kind] += 1
+            used_nums[kind].add(num)
+            inserts.append((pos, tag))
+            existing_low.add(tag.lower())
+            matched.add((kind, num))
+
+    # 音频：**不**在角色名后插裸标签（那会变成"悬空标记"，模型不知道给谁配音）；
+    # 改为绑到「它配的那句台词」上，形态 `音色参考 <Audio N>：台词`（与 h3prompt.py
+    # 的 RE_VOICE_KEY / RE_VOICE_REF_MID 识别契约一致）。
+    _voice_taken = set()   # 本镜已被音频占用的台词位置（一句只绑一个音色）
+    for c in sorted(cands_by_kind.get("audio") or [], key=lambda x: (-len(x.get("key") or ""), x.get("num") or 0)):
+        key = str(c.get("key") or "")
+        num = int(c.get("num") or 0)
+        tag = _TAG_FMT["audio"].format(num)
+        if num >= 1 and tag.lower() in existing_low:
+            matched.add(("audio", num))
+            continue
+        if counts["audio"] >= _REF_LIMITS["audio"]:
+            continue
+        if not key or not _usable_rel(c.get("rel")):
+            continue
+        if num in used_nums["audio"]:
+            nxt = 1
+            while nxt in used_nums["audio"] or nxt > _REF_LIMITS["audio"]:
+                nxt += 1
+            if nxt > _REF_LIMITS["audio"]:
+                continue
+            num = nxt
+            tag = _TAG_FMT["audio"].format(num)
+        # ① 该音频配的台词：优先"音色/配音/声音"关键词行；否则找正文里的台词行
+        pos, form = _find_voice_slot(body_text, key, _voice_taken)
+        if pos < 0:
+            continue
+        new_tags.append({"kind": "audio", "index": num - 1, "fileName": c.get("name"),
+                         "keyword": key, "tag": tag, "rel": c.get("rel"), "num": num,
+                         "bound": "voice"})
+        counts["audio"] += 1
+        used_nums["audio"].add(num)
+        inserts.append((pos, form.format(tag=tag)))
+        _voice_taken.add(pos)
+        existing_low.add(tag.lower())
+        matched.add(("audio", num))
+
+    return new_tags, matched, inserts
+
+
+# 台词行识别：`（S1）说：台词` / `云妙衣：台词` / `云妙衣 <Picture 1>：台词` /
+#   `「台词」` / `[Chinese] 台词` 等
+#   与 h3prompt.py 的台词抽取契约同源：说话人 = 最近一个 <Picture/Subject N> 或「名字：」
+#   ⚠ 说话人与冒号之间常夹着参考槽标记（`陆沉 <Picture 3>：我来了`）→ 必须放行
+_RE_SPEAKER_COLON = re.compile(
+    r"([^\s，。；！？\n]{0,12})\s*"
+    r"(?:<\s*(?:Picture|Subject|Video)\s*\d+\s*>\s*)?"
+    r"(?:说|道|喊|叫|问|答|低语|轻声|高声)?\s*[：:]\s*\S")
+# 已带音色参考的行（避免重复插）
+_RE_HAS_VOICE_REF = re.compile(
+    r"(?:音\s*色|配\s*音|声\s*音|语\s*音|voice|timbre|tone)\s*(?:参\s*考|参\s*照)?\s*[：:]?\s*<\s*Audio\s*\d+\s*>",
+    re.IGNORECASE)
+
+
+def _find_voice_slot(text, key, taken=None):
+    """为音频找它该绑的台词，返回 (插入位置, 插入模板)；找不到返回 (-1, "")。
+
+    插入形态：`音色参考 <Audio N>：` 直接放在台词冒号之后，
+    这样 h3prompt.py 的 RE_VOICE_REF_MID 能把它识别成"这句台词的音色"。
+    优先级：① 含 key 关键词的台词行 → ② 正文里第一条**未被占用**的台词行
+
+    taken：本镜已被别的音频占用的插入位置集合 —— 同一句台词只绑一个音色，
+    否则多个 <Audio N> 会叠在同一处（实测会插出 `音色参考 <Audio 1>： 音色参考 <Audio 2>：`）。
+    """
+    body = str(text or "")
+    taken = taken if isinstance(taken, set) else set()
+    lines = body.split("\n")
+    offset = 0
+    fallback = (-1, "")
+    for ln in lines:
+        m = _RE_SPEAKER_COLON.search(ln)
+        if m and not _RE_HAS_VOICE_REF.search(ln):
+            # 冒号位置：在本次匹配区间里找（区间可能跨过 <Picture N> 标记）
+            seg = ln[m.start():m.end()]
+            ci = seg.rfind("：")
+            if ci < 0:
+                ci = seg.rfind(":")
+            if ci < 0:
+                offset += len(ln) + 1
+                continue
+            pos = offset + m.start() + ci + 1
+            if pos in taken:
+                offset += len(ln) + 1
+                continue
+            form = " 音色参考 {tag}："
+            if key and key in ln:
+                return pos, form            # ① 关键词就在这句台词行上
+            if fallback[0] < 0:
+                fallback = (pos, form)       # ② 记住第一条可用台词行
+        offset += len(ln) + 1
+    return fallback
+
+
+def _find_keyword_pos(text, key, all_keys):
+    """找关键词在正文里可用的出现位置，返回**末尾下标**；找不到返回 -1。
+
+    边界规则（与 _scan_per_shot_refs 的角色名匹配同源，避免误命中）：
+      · 左邻不能是 **ASCII** 字母/数字（防英文名嵌词）
+        ⚠ 不能用 str.isalnum() —— 中文汉字在 Python 里也返回 True
+        （"在废弃仓库门口"里的"在"会判成 alnum → 中文关键词永远匹配不上，踩过）
+      · 该位置不能是另一个更长关键词的开头（"张三" 不抢 "张三丰"）
+    """
+    if not key:
+        return -1
+    low = text.lower()
+    longer = [k for k in (all_keys or []) if k and k != key and key.lower() in k.lower()]
+    for mm in re.finditer(re.escape(key), text, re.IGNORECASE):
+        st = mm.start()
+        if st > 0 and _ASCII_ALNUM_RE.match(text[st - 1]):
+            continue
+        seg = low[st: st + max([len(k) for k in longer] or [0]) + 2]
+        if any(seg.startswith(k.lower()) for k in longer):
+            continue
+        return mm.end()
+    return -1
+
+
+def _apply_inserts(text, inserts):
+    """把 (pos, tag) 插入点写回文本：从后往前插入，保证前面的位置不漂移。
+
+    插入片段**自带**首尾空格（图片/视频是 ` <Picture N>`，音频是 ` 音色参考 <Audio N>：`）
+    → 这里不再补空格，避免出现双空格或"标记贴在名字上"。
+    """
+    out = str(text or "")
+    for pos, frag in sorted(inserts, key=lambda x: -x[0]):
+        p = max(0, min(len(out), int(pos)))
+        f = str(frag)
+        if not f.startswith((" ", "\t")) and out[:p] and not out[:p].endswith((" ", "\n")):
+            f = " " + f
+        out = out[:p] + f + out[p:]
+    return out
+
+
+async def studio_asset_match(req):
+    """POST /mrnext/studio/asset_match —— 按旧包语义给每镜匹配素材并插入引用标记。
+
+    body: {texts:[分镜正文], markers?:[每镜标记行], folder?, imgRef?, audRef?, vidRef?,
+           candidates?:[{name,rel,kind}], apply?:bool}
+    apply=True → 返回可直接写回 store.shots[i].text 的 modifiedTexts；否则只给建议。
+    返回 {perShot, modifiedTexts, unmatched, limits, stats}
+    """
+    try:
+        body = await req.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    texts = body.get("texts")
+    if not isinstance(texts, list) or not texts:
+        return _json({"error": "texts 不合法"}, status=400)
+    markers = body.get("markers") if isinstance(body.get("markers"), list) else []
+    folder = str(body.get("folder") or "").strip()
+
+    cands_by_kind = _collect_match_cands(body, folder)
+    if not any(cands_by_kind.values()):
+        return _json({"error": "没有可用素材 —— 先上传素材或填「N=文件名」引用表"}, status=400)
+
+    texts = [str(t or "") for t in texts]
+    per_shot, modified, all_matched = [], [], set()
+    for i, t in enumerate(texts):
+        new_tags, matched, inserts = _analyze_one_shot_match(t, cands_by_kind)
+        per_shot.append(new_tags)
+        all_matched.update(matched)
+        mk = str(markers[i]).strip() if i < len(markers) and markers[i] else ""
+        mtext = _apply_inserts(t, inserts)
+        modified.append((mk + "\n" + mtext).strip() if mk else mtext)
+
+    unmatched = []
+    for kind in ("image", "audio", "video"):
+        for c in cands_by_kind.get(kind) or []:
+            num = int(c.get("num") or 0)
+            if num >= 1 and (kind, num) in all_matched:
+                continue
+            if not c.get("key"):
+                reason = "关键词为空（文件名去掉后缀后没有可用词）"
+            elif not _usable_rel(c.get("rel")):
+                reason = "文件不存在（引用表里的名字在素材文件夹里找不到）"
+            else:
+                reason = "未在任何分镜中找到匹配"
+            unmatched.append({"kind": kind, "fileName": c.get("name"),
+                              "keyword": c.get("key"), "num": num, "reason": reason})
+
+    hit_total = sum(len(x) for x in per_shot)
+    return _json({
+        "perShot": per_shot,
+        "modifiedTexts": modified,
+        "unmatched": unmatched,
+        "limits": _REF_LIMITS,
+        "stats": {"shots": len(texts), "inserted": hit_total,
+                  "cands": {k: len(v) for k, v in cands_by_kind.items()}},
+    })
+
+
 async def studio_analyze(req):
     """把分镜正文与候选资产（收藏库/文件名）按「名字」匹配。
 
     body: {texts:[每个分镜正文], candidates:[{name,rel,kind,category}]}
     name 及其括号前主干（如「林晚（女主角）」→ 林晚）命中正文即算匹配。
     返回 perShot（与 texts 对齐的命中列表）+ used。只做匹配，不改写文本。
+
+    注：如需「按文件名关键词匹配 + 自动插入 <Picture/Audio/Video N>」（旧包同款），
+    用 /mrnext/studio/asset_match。
     """
     body = await req.json()
     texts = body.get("texts") or []
@@ -3866,6 +4273,7 @@ ROUTES = [
     ("POST", "/mrnext/studio/save_asset", studio_save_asset),
     ("POST", "/mrnext/studio/reveal", studio_reveal),
     ("POST", "/mrnext/studio/analyze", studio_analyze),
+    ("POST", "/mrnext/studio/asset_match", studio_asset_match),
     ("POST", "/mrnext/studio/delete_files", studio_delete_files),
     ("POST", "/mrnext/studio/clear_folder", studio_clear_folder),
     ("POST", "/mrnext/editor/clear_materials", editor_clear_materials),
