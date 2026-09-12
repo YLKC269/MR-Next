@@ -802,9 +802,8 @@ def apply_audio_guard(opts, default_min_steps=8):
     画面正常但音轨失真/变噪音 —— 根因是主仓 bug（修复 commit bdcb886，仅在
     nightly）。本护栏不改模型、不改采样器，只把步数兜到安全线，保证出片音轨可用。
 
-    例外：T8 双时钟分离采样（dual_clock）开启且音频独立步数已达安全线时，
-    音轨在自己的时钟推进、不受视频低步数拖累 —— 不抬步数（否则预览档的
-    6 步提速会被强行抬回 8+，白丢社区方案的收益）。
+    采样固定走官方单时钟（T8 双时钟方案已移除），所以音频与视频共用同一套步数，
+    低步数必须抬 —— 没有「音频独立步数」这条绕行路径了。
     """
     o = dict(opts or {})
     g = o.get("audio_guard", True)
@@ -815,13 +814,6 @@ def apply_audio_guard(opts, default_min_steps=8):
     except (TypeError, ValueError):
         min_steps = default_min_steps
     min_steps = max(4, min(32, min_steps))
-    if o.get("dual_clock"):
-        try:
-            sa = int(o.get("steps_audio") or 0)
-        except (TypeError, ValueError):
-            sa = 0
-        if sa >= min_steps:
-            return o, ""
     cur = o.get("steps")
     try:
         cur_i = int(cur) if cur not in (None, "") else None

@@ -87,8 +87,6 @@ const DEFAULT_PARAMS = () => ({
     // 高级采样（官方 bd_grp_advanced）
     // 社区成片基线：18–22 步（20 = 生产档；>24 收益极低、时间成倍）；res_multistep + simple + cfg=1（引导蒸馏，拉高 CFG 反而闪烁）
     steps: 20, sampler: "res_multistep", scheduler: "simple", shift_video: 12, shift_audio: 3,
-    // T8 双时钟分离采样（社区低步数提速方案）：音频在自己的时钟独立推进 —— 视频 6 步提速时音频仍可跑 10 步防失真
-    dual_clock: false, steps_audio: 0,
     // 性能（官方 bd_grp_perf）
     clear_vram: true, export_src: false,   // 官方 clear_vram_between_segments 默认 True（对齐官方）
     // 导出模式：all=全部合成一条视频，segments=每镜独立导出（官方导演台同款）
@@ -654,25 +652,7 @@ export function createTimelinePanel(ctx) {
       stepsE.oninput = () => { P.output.steps = Math.max(1, Math.min(200, Number(stepsE.value) || 20)); if (stepsWarnPainter) stepsWarnPainter(); };
       const samplerE = sel((opts?.samplers || ["res_multistep"]), P.output.sampler || "res_multistep"); samplerE.onchange = () => { P.output.sampler = samplerE.value; };
       const schedE = sel((opts?.schedulers || ["simple"]), P.output.scheduler || "simple"); schedE.onchange = () => { P.output.scheduler = schedE.value; };
-      // T8 双时钟分离采样（社区方案：视频低步数提速时，音频在自己的时钟独立推进防失真）。
-      // 节点端 dual_clock/steps_audio 已支持；开启后采样走双时钟 euler，切分失败自动回退官方单时钟。
-      const dcCk = h("input", { type: "checkbox", checked: P.output.dual_clock ? "checked" : null, style: { accentColor: "#ffd166" } });
-      const dcStepsE = num(P.output.steps_audio || 10, "10", 56, 1);
-      dcStepsE.min = 4; dcStepsE.max = 32;
-      dcStepsE.disabled = !P.output.dual_clock;
-      dcCk.onchange = () => {
-        P.output.dual_clock = dcCk.checked;
-        dcStepsE.disabled = !dcCk.checked;
-        if (dcCk.checked && !Number(P.output.steps_audio)) P.output.steps_audio = 10;
-        if (stepsWarnPainter) stepsWarnPainter();
-      };
-      dcStepsE.oninput = () => {
-        P.output.steps_audio = Math.max(4, Math.min(32, Number(dcStepsE.value) || 10));
-        if (stepsWarnPainter) stepsWarnPainter();
-      };
-      const dcWrap = h("div", { class: "row", style: { gap: 6, alignItems: "center" } }, dcCk,
-        h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 dual_clock + steps_audio：音频独立时钟独立步数。社区低步数提速方案 —— 视频压到 4/6 步时音频仍可跑 8–12 步，避免爆音/杂音；本机/本模型不支持时静默回退官方单时钟（出片不会失败）" }, "音频独立步数"),
-        dcStepsE);
+      // 采样一律走官方单时钟（T8 双时钟方案已摘除：它是实验分支，跑不出片的代价远大于收益）。
       // 采样方案按钮组（采样器+调度器组合预设，一键切换）
       const SAMPLE_PRESETS = [
         { label: "官方标准", sampler: "res_multistep", scheduler: "simple", tip: "官方推荐，质量稳定" },
@@ -698,14 +678,14 @@ export function createTimelinePanel(ctx) {
       renderPreset();
       // 画质档位（对齐社区"预览归预览、成片归成片"两套工作流）。
       // 公共基线：res_multistep + simple + cfg=1（引导蒸馏）+ shift 12/3（训练值）。
-      // 预览 = SageAttention + 蒸馏 LoRA 低步数 + 双时钟（音频独立步数防失真）；
-      // 成片 = SageAttention + 16–20 步原生采样（社区实测 >24 步收益极低）+ 二采。
+      // 预览 = SageAttention + 蒸馏 LoRA 低步数；成片 = SageAttention + 16–20 步原生采样 + 二采。
+      // 采样统一走官方单时钟（双时钟已摘除）。
       const QUALITY_PRESETS = [
-        { key: "draft", label: "⚡ 草稿 6步", steps: 6, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 1.0, upscale: "off", dual: 10,
-          tip: "社区预览方案：SageAttention + 蒸馏 LoRA 6 步 + T8 双时钟（音频独立 10 步，防低步数爆音）。最快，只用于验证构图/动作/台词。若人声仍有电流噪，可把「音频 shift」试 6（Turbo 社区值）" },
-        { key: "standard", label: "⚖ 标准 16步", steps: 16, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "off", dual: 0,
+        { key: "draft", label: "⚡ 草稿 6步", steps: 6, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 1.0, upscale: "off", turbo: true,
+          tip: "社区预览方案：SageAttention + 蒸馏 LoRA 6 步。最快，只用于验证构图/动作/台词。低步数音轨易失真，已由「声音」页音频护栏自动抬到安全步数" },
+        { key: "standard", label: "⚖ 标准 16步", steps: 16, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "off", turbo: false,
           tip: "社区基线：res_multistep + simple + cfg=1。实测低于 ~15 步画质明显下降，16 步是画质/速度均衡点" },
-        { key: "final", label: "✨ 成品 20步", steps: 20, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "auto", dual: 0,
+        { key: "final", label: "✨ 成品 20步", steps: 20, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "auto", turbo: false,
           tip: "社区成片方案：20 步生产基线（>24 收益极低）+ 出片后自动二采高清放大。最慢，但画质/音质最好" },
       ];
       const qualWrap = h("div", { class: "row", style: { gap: 4, flexWrap: "wrap" } });
@@ -722,17 +702,13 @@ export function createTimelinePanel(ctx) {
               P.output.steps = q.steps; P.output.sampler = q.sampler; P.output.scheduler = q.scheduler;
               P.output.cfg = q.cfg; P.output.shift_video = q.sv; P.output.shift_audio = q.sa;
               P.output.upscale_mode = q.upscale || "off";
-              // 双时钟分离采样：预览档开启并给音频独立步数；其余档关（成片走官方单时钟）
-              P.output.dual_clock = !!q.dual; P.output.steps_audio = q.dual || 0;
-              dcCk.checked = !!q.dual; dcStepsE.disabled = !q.dual;
-              if (q.dual) dcStepsE.value = String(q.dual);
               const notes = [];
               // 社区加速哲学：SageAttention 近乎无损、成片可开；档位一键带上（后端不可用会自动降级）
               const _sageBad = P.speed.accelInfo && P.speed.accelInfo.sage && P.speed.accelInfo.sage.available === false;
               if (!_sageBad && P.speed.accel !== "sage") { P.speed.accel = "sage"; notes.push("SageAttention 已开（社区首选 · 近乎无损 · 2–4×）"); }
               if (_sageBad && P.speed.accel === "sage") { P.speed.accel = "off"; notes.push("本机 SageAttention 不可用 → 保持关闭"); }
               // 蒸馏 LoRA 只属于预览档（社区结论：损伤音质，不进成片）—— 切标准/成品自动关掉
-              if (q.dual) {
+              if (q.turbo) {
                 P.speed.loraS = q.turboS || 1;
                 if (!P.speed.lora || P.speed.lora === "(无)") {
                   ctx.toast("草稿档请到「⚡加速」页选一个蒸馏 LoRA（4/8 步），否则低步数画质会崩", true);
@@ -792,10 +768,9 @@ export function createTimelinePanel(ctx) {
         h("div", { class: "muted", style: { fontSize: 10, fontWeight: 600, color: "#6f88a8", letterSpacing: ".4px" } }, title),
         ...kids);
       const secCore = subSection("采样核心",
-        h("div", { style: { display: "grid", gridTemplateColumns: "minmax(80px, 1fr) minmax(220px, 2.5fr) minmax(140px, 1.1fr)", gap: 8, alignItems: "start" } },
+        h("div", { style: { display: "grid", gridTemplateColumns: "minmax(80px, 1fr) minmax(240px, 2.6fr)", gap: 8, alignItems: "start" } },
           field("步数", stepsE, "steps (1-200)"),
-          field("画质档位", qualWrap, "社区两套方案：预览（6 步+Turbo+双时钟）/ 标准 16 步 / 成品 20 步+二采"),
-          field("双时钟·音频步数", dcWrap, "dual_clock / steps_audio：视频低步数提速时音频独立推进，防爆音；不支持时自动回退单时钟")));
+          field("画质档位", qualWrap, "社区两套方案：预览（6 步+Turbo）/ 标准 16 步 / 成品 20 步+二采")));
       const secSampler = subSection("采样器与引导",
         h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(118px, 1fr))", gap: 6 } },
           field("采样器", samplerE, "sampler"),
@@ -853,23 +828,11 @@ export function createTimelinePanel(ctx) {
       const paintWarn = () => {
         const st = Number(P.output.steps) || 0;
         const minS = Number(A.min_steps || 8);
-        // 双时钟分离采样：音轨在自己的时钟推进 → 只看音频独立步数，视频低步数不再拖累音质
-        if (P.output.dual_clock) {
-          const sa = Number(P.output.steps_audio) || 0;
-          if (sa >= minS) {
-            warn.style.color = "#8ff0c0";
-            warn.textContent = `✓ 双时钟分离采样：视频 ${st} 步 · 音频 ${sa} 步（低步数提速不伤音轨）`;
-          } else {
-            warn.style.color = "#ffb35c";
-            warn.textContent = `⚠ 双时钟已开，但音频独立步数 ${sa} < 安全线 ${minS}：音轨仍可能失真，建议音频步数 ≥ ${minS}`;
-          }
-          return;
-        }
         warn.style.color = "#ffb35c";
         if (st > 0 && st < minS) {
           warn.textContent = A.guard === false
-            ? `⚠ 当前 ${st} 步 < 安全线 ${minS} 步：低步数下音轨极易失真（画质正常、声音变噪音）。建议升 ComfyUI nightly，或关掉护栏时手动提到 ${minS} 步以上，或开启「采样设置 → 双时钟」让音频独立跑步数。`
-            : `⏫ 当前 ${st} 步 < 安全线 ${minS} 步：出片时会自动抬到 ${minS} 步（护栏已开启；想保住低步数提速请开启「采样设置 → 双时钟」并设音频步数 ≥ ${minS}）。`;
+            ? `⚠ 当前 ${st} 步 < 安全线 ${minS} 步：低步数下音轨极易失真（画质正常、声音变噪音）。建议升 ComfyUI nightly，或关掉护栏时手动把步数提到 ${minS} 以上。`
+            : `⏫ 当前 ${st} 步 < 安全线 ${minS} 步：出片时会自动抬到 ${minS} 步（护栏已开启）。`;
         } else { warn.textContent = ""; }
       };
       paintWarn();
@@ -1652,9 +1615,6 @@ export function createTimelinePanel(ctx) {
       ref_max_size: P.output.ref_size, frame_rate: P.output.fps, steps: P.output.steps,
       ref_image_size: P.output.ref_image_size || "match",
       cfg: P.output.cfg, shift_video: P.output.shift_video, shift_audio: P.output.shift_audio,
-      // T8 双时钟分离采样（社区低步数提速方案）：false 也显式下发，防旧缓存/旧 widget 残留 true
-      dual_clock: !!P.output.dual_clock,
-      steps_audio: P.output.dual_clock ? Math.max(0, Math.round(Number(P.output.steps_audio) || 0)) : 0,
       sampler: P.output.sampler || undefined, scheduler: P.output.scheduler || undefined,
       clear_vram_between_segments: !!P.output.clear_vram,
       export_source_images: !!P.output.export_src,

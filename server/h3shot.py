@@ -316,15 +316,13 @@ def _apply_opts_overrides(widget, opts):
               "steps", "sampler", "scheduler", "shift_video", "shift_audio", "cfg",
               # v1.11.13 内置注意力加速（off/sage/block_sparse）—— 必须在这里白名单里，
               # 否则前端选了也传不进节点 widget（真进图断言会挂）
-              "attention_accel", "dual_clock", "steps_audio"):
+              "attention_accel"):
         if k in o and o[k] not in (None, ""):
             try:
-                if k in ("steps", "width", "height", "ref_max_size", "total_frames", "steps_audio"):
+                if k in ("steps", "width", "height", "ref_max_size", "total_frames"):
                     widget[k] = int(o[k])
                 elif k in ("frame_rate", "cfg", "shift_video", "shift_audio"):
                     widget[k] = float(o[k])
-                elif k == "dual_clock":
-                    widget[k] = bool(o[k])
                 else:
                     widget[k] = str(o[k])
             except Exception:  # noqa: BLE001
