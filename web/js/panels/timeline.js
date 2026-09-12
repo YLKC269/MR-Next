@@ -2323,6 +2323,20 @@ export function createTimelinePanel(ctx) {
   const renderTrack = () => {
     const shots = ctx.store.get().shots || [];
     clear(ruler); clear(track);
+    if (!shots.length) {
+      // 空工作区：明确提示，避免看起来像"坏了"
+      const hint = h("div", { class: "tl-empty", style: { display: "flex", flexDirection: "column", alignItems: "center", gap: 10, padding: "20px 16px", width: "100%", color: "#7d92b3" } },
+        h("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: 4 } },
+          h("div", { style: { fontSize: 22, lineHeight: 1 } }, "🎬"),
+          h("div", { style: { fontSize: 13, fontWeight: 600, color: "#aebdde" } }, "时间线还没有分镜"),
+          h("div", { style: { fontSize: 11 } }, "在「剧本」面板拆好分镜，或直接点下方按钮开第一条"),
+        ),
+        h("button", { class: "btn btn-primary", onclick: appendShot, style: { padding: "6px 18px", fontSize: 12 } }, "＋ 添加第一个分镜"),
+      );
+      track.appendChild(hint);
+      ruler.appendChild(h("div", { class: "tl-tick" }, "总长 0.0s"));
+      return;
+    }
     let cursor = 0;
     shots.forEach((sh, i) => {
       const c = shot(i);

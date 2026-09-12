@@ -431,5 +431,19 @@ export function mountApp(shadow, node) {
   // 主区域：drawer（左，折叠时宽度0） + nav+content（右）
   const mainArea = h("div", { class: "mx-main-area" }, drawer, h("div", { class: "mx-body" }, nav, content));
   root.append(header, mainArea, fab);
-  activate("script");
+  // 节点本职是导演台：默认打开时间线面板（之前默认"剧本"导致节点打开时一片空白）
+  activate("timeline");
+  // 节点挂载时从 plan 兜底加载分镜（**仅当 store 为空时**填，避免覆盖你正在编辑的分镜）。
+  // 解决崩溃/刷新后节点 DOM 部件空空如也、看起来"坏了"的问题。
+  try {
+    const _hasShots = (ctx.store.get().shots || []).length > 0;
+    if (!_hasShots) {
+      const _folder = (node.widgets_values && node.widgets_values[0]) || "mrboard_next";
+      ctx.api.readPlan(_folder).then((r) => {
+        if (r && r.ok && r.shots && r.shots.length) {
+          ctx.store.set({ shots: r.shots, refMap: r.refMap || [] });
+        }
+      }).catch(() => {});
+    }
+  } catch (_) {}
 }

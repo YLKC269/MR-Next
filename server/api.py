@@ -687,6 +687,28 @@ async def studio_save_plan(req):
     return _json({"ok": True, "path": path})
 
 
+async def studio_read_plan(req):
+    """GET /mrnext/studio/read_plan?folder=... —— 读 input/{folder}/_plan.json。
+
+    节点 mount 时由前端调，把分镜写进面板 store，让节点的 DOM 部件不再"空空的像坏了"
+    （之前只在每次 execute 后才被填内容，崩溃/刷新后就是空的）。
+    不存在则返回空 shots。
+    """
+    folder = (req.query.get("folder") or "").strip()
+    base = _input_base()
+    path = _safe_join(base, folder + "/_plan.json") if folder else ""
+    if not path or not os.path.isfile(path):
+        return _json({"ok": True, "shots": [], "refMap": []})
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as exc:  # noqa: BLE001
+        return _json({"ok": True, "shots": [], "refMap": [], "warning": f"读取失败：{exc}"})
+    if not isinstance(data, dict):
+        return _json({"ok": True, "shots": [], "refMap": []})
+    return _json({"ok": True, "shots": data.get("shots") or [], "refMap": data.get("refMap") or []})
+
+
 _SEG_RE = re.compile(
     r"^\s*(?:"
     r"S\d+(?:\s*/\s*N\d+)?\s*[:：]?|"            # 0715 S05 或 S05/N3
@@ -4281,6 +4303,7 @@ ROUTES = [
     ("POST", "/mrnext/studio/extract_defs", studio_extract_defs),
     ("POST", "/mrnext/studio/asset_plan", studio_asset_plan),
     ("POST", "/mrnext/studio/save_plan", studio_save_plan),
+    ("GET", "/mrnext/studio/read_plan", studio_read_plan),
     ("GET", "/mrnext/assetgen/models", assetgen_models),
     ("GET", "/mrnext/assetgen/config", assetgen_config),
     ("POST", "/mrnext/assetgen/generate", assetgen_generate),

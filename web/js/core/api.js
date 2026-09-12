@@ -74,6 +74,7 @@ export const StudioAPI = {
     postJson("/mrnext/studio/extract_defs", { script, prefix }),
   assetPlan: (script, prefix = "") => postJson("/mrnext/studio/asset_plan", { script, prefix }),
   savePlan: (folder, shots) => postJson("/mrnext/studio/save_plan", { folder, shots }),
+  readPlan: (folder) => getJson(`/mrnext/studio/read_plan?folder=${encodeURIComponent(folder)}`),
   models: () => getJson("/mrnext/assetgen/models"),
   assetgenConfig: (useLora, loraFolder) => {
     const q = new URLSearchParams();
