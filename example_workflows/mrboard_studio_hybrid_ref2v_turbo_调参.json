@@ -1,0 +1,131 @@
+{
+  "id": "mrboard-studio-hybrid-ref2v-turbo",
+  "revision": 0,
+  "last_node_id": 1,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "MRBoardStudio",
+      "pos": [
+        200,
+        120
+      ],
+      "size": [
+        1160,
+        900
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "asset_folder",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "asset_folder"
+          }
+        },
+        {
+          "name": "model_name",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "model_name"
+          }
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "seed"
+          }
+        },
+        {
+          "name": "auto_preview",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "auto_preview"
+          }
+        },
+        {
+          "name": "params_json",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "params_json"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "分镜数据",
+          "type": "STRING",
+          "links": null,
+          "widget": {
+            "name": "分镜数据"
+          }
+        },
+        {
+          "name": "分镜提示词",
+          "type": "STRING",
+          "links": null,
+          "widget": {
+            "name": "分镜提示词"
+          }
+        },
+        {
+          "name": "分镜数",
+          "type": "INT",
+          "links": null,
+          "widget": {
+            "name": "分镜数"
+          }
+        },
+        {
+          "name": "成片视频",
+          "type": "VIDEO",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MRBoardStudio"
+      },
+      "widgets_values": [
+        "mrboard_next",
+        "",
+        0,
+        "randomize",
+        true,
+        "{\n  \"unet_name\": \"minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors\",\n  \"clip_name\": \"qwen3vl_32b_minimax_h3_int8_convrot.safetensors\",\n  \"video_vae_name\": \"minimax_h3_video_vae_fp16.safetensors\",\n  \"audio_vae_name\": \"minimax_h3_audio_vae_fp32.safetensors\",\n  \"speed_lora\": \"minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors\",\n  \"speed_lora_strength\": 1.0,\n  \"steps\": 8,\n  \"cfg\": 1,\n  \"sampler\": \"res_multistep\",\n  \"scheduler\": \"simple\",\n  \"shift_video\": 12,\n  \"shift_audio\": 3,\n  \"width\": 720,\n  \"height\": 1280,\n  \"frame_rate\": 24,\n  \"ref_max_size\": 864,\n  \"attention_accel\": \"off\",\n  \"clear_vram_between_segments\": true,\n  \"export_source_images\": false\n}",
+        ""
+      ],
+      "widgets_values_named": {
+        "asset_folder": "mrboard_next",
+        "model_name": "",
+        "seed": 0,
+        "control_after_generate": "randomize",
+        "auto_preview": true,
+        "params_json": "{\n  \"unet_name\": \"minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors\",\n  \"clip_name\": \"qwen3vl_32b_minimax_h3_int8_convrot.safetensors\",\n  \"video_vae_name\": \"minimax_h3_video_vae_fp16.safetensors\",\n  \"audio_vae_name\": \"minimax_h3_audio_vae_fp32.safetensors\",\n  \"speed_lora\": \"minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors\",\n  \"speed_lora_strength\": 1.0,\n  \"steps\": 8,\n  \"cfg\": 1,\n  \"sampler\": \"res_multistep\",\n  \"scheduler\": \"simple\",\n  \"shift_video\": 12,\n  \"shift_audio\": 3,\n  \"width\": 720,\n  \"height\": 1280,\n  \"frame_rate\": 24,\n  \"ref_max_size\": 864,\n  \"attention_accel\": \"off\",\n  \"clear_vram_between_segments\": true,\n  \"export_source_images\": false\n}",
+        "mrnext_ui": ""
+      }
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7,
+      "offset": [
+        1200,
+        900
+      ]
+    }
+  },
+  "version": 0.4
+}
