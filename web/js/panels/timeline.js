@@ -8,6 +8,8 @@ import { assetRegistry } from "../core/assets.js";
 import { lightbox, closeLightbox, videoThumb, audioThumb } from "../core/ui.js";
 import { stripVirtualRefs, isUsableRel } from "../core/purify.js";
 import { VIDEO_SIZES, DEFAULT_VID_SIZE_INDEX, CUSTOM_VID_SIZE_INDEX, resolveVidSize, mpToWH, orientVidIndex } from "../core/sizes.js";
+// 导出到剪辑面板的**统一实现**（与「一键流水线」共用，见 core/editor_io.js 顶部说明）
+import { exportVideosToEditor, sendVideosToEditor } from "../core/editor_io.js";
 
 const MODES = [
   { v: "t2v", label: "文生视频（纯文字→视频）T2V" },
@@ -1830,11 +1832,11 @@ export function createTimelinePanel(ctx) {
       P.output.upscale_engine = savedEng;
     }
   };
-  // 发送到剪辑页面：写 pendingEditorVideo → 切到剪辑面板 → 剪辑面板 refreshMaterials 自动加到 V1
+  // 发送到剪辑页面：走 core/editor_io 的统一队列（写 pendingEditorVideos → 切到剪辑面板 →
+  // 剪辑面板 refreshMaterials **按数组顺序**逐条加到 V1 轨）。
+  const sendManyToEditor = (rels, note) => sendVideosToEditor(ctx, rels, note);
   const sendToEditor = (rel) => {
-    ctx.store.set({ pendingEditorVideo: rel });
-    ctx.switchTo("editor");
-    ctx.toast("已发送到剪辑页面 V1 轨");
+    if (sendManyToEditor([rel])) ctx.toast("已发送到剪辑页面 V1 轨");
   };
   // 幽灵素材剔除：素材被清理（删文件 / 清空素材库）后，九宫格与 refMap 里可能还留着
   // 已不存在的 rel。不剔除的话这些旧参考图会继续参与构图，污染其它模式的适配生成。
@@ -2150,11 +2152,34 @@ export function createTimelinePanel(ctx) {
     ev.stopPropagation();
     if (busy) { ctx.toast("正在运行，先停止", true); return; }
     const b = ev.currentTarget;
+    // 单镜出片也要能完成「全部导出」：先记下**出片前**是否还有镜没视频 ——
+    // 只有当这一镜把"最后一处缺口"补上时才自动拼接，重复重跑某一镜不会反复拼/重复入轨。
+    const _allShots = ctx.store.get().shots || [];
+    const _wasIncomplete = _allShots.some((_s, k) => !String((shot(k) || {}).videoRel || "").trim());
     b.disabled = true; b.textContent = "采样中…";
     busy = true;
     try { await runOne(i); }
     catch (e) { ctx.toast("出片异常: " + e.message, true); }
-    finally { busy = false; b.disabled = false; b.textContent = "▶ 出片"; }
+    finally {
+      busy = false; b.disabled = false; b.textContent = "▶ 出片";
+      try {
+        if (P.output.exportMode !== "all") {
+          // 分段导出：点一镜就把它送进剪辑面板（"分段导出 = 一段一段进剪辑面板"）。
+          // ⚠ 只在**逐镜按钮**这里做、不放进 runOne：runOne 会被整条连跑/出片选中循环调用，
+          //   放进去会让批量跑完后再被 exportToEditor 导入一遍 → V1 轨出现双份。
+          const rel = String((shot(i) && shot(i).videoRel) || "").trim();
+          if (rel) sendManyToEditor([rel], `已按分镜顺序导入第 ${shot(i).index} 镜到剪辑面板`);
+        } else if (_wasIncomplete) {
+          // 全部导出：这一镜刚好补齐所有分镜 → 立刻拼接 + 导入（用户"逐镜点完"也能拿到整条成片）
+          const now = ctx.store.get().shots || [];
+          const complete = now.length > 0 && now.every((_s, k) => String((shot(k) || {}).videoRel || "").trim());
+          if (complete) {
+            println(`🎬 全部分镜已出片（${now.length} 段）→ 自动开始全部导出`, "#ffd98f");
+            await exportToEditor(null);
+          }
+        }
+      } catch (e) { println(`✗ 导出剪辑失败：${e.message}`, "#ffb4b4"); }
+    }
   } }, "▶ 出片");
 
   // 全部衔接开关：一键在每个相邻分镜之间开启/关闭上下文引导
@@ -2323,34 +2348,28 @@ export function createTimelinePanel(ctx) {
   topVidH.oninput = _topVidCustom;
   refreshTopVid();
 
-  // 全部导出后拼接视频（官方导演台默认）+ 自动导入到剪辑面板素材库
-  const composeIfAll = async (resultCallback) => {
-    if (P.output.exportMode !== "all") return;
-    const shots = ctx.store.get().shots || [];
-    const segs = shots
-      .map((_, i) => ({ rel: shot(i).videoRel, in_: 0, out_: 0 }))
-      .filter((s) => s.rel);
-    if (segs.length < 2) {
-      if (typeof resultCallback === "function") resultCallback(null);
-      return;
-    }
-    println(`🎬 正在拼接 ${segs.length} 段为完整视频…`, "#ffd98f");
-    try {
-      const r = await ctx.api.composeEditor(folder(), segs);
-      if (r.ok && r.rel) {
-        println(`✓ 已拼接 → ${r.rel}${r.filename ? `（${r.filename}）` : ""}`, "#8ff0c0");
-        ctx.toast("视频已拼接完成，已入剪辑素材库");
-        // compose_*.mp4 落盘在资产 video/ 目录，刷新剪辑面板素材列表即可见
-        if (ctx.refreshPanel) ctx.refreshPanel("editor");
-        if (typeof resultCallback === "function") resultCallback(r);
-      } else {
-        println(`✗ 拼接失败：${r.error || "未知错误"}`, "#ffb4b4");
-        if (typeof resultCallback === "function") resultCallback(null);
-      }
-    } catch (e) {
-      println(`✗ 拼接异常：${e.message}`, "#ffb4b4");
-      if (typeof resultCallback === "function") resultCallback(null);
-    }
+  // ── 出片结束后的「导出到剪辑面板」 ────────────────────────────────────────
+  // 只负责**按分镜顺序收集 rels**，真正的导出语义（拼接/逐段 + 入轨）在 core/editor_io.js，
+  // 与「一键流水线」共用同一实现（以前流水线完全没有这一步，日志却写着"已自动导入"）。
+  //   · 全部导出（all）      → 拼成一整条 → 只把这一条送进剪辑面板
+  //   · 分段导出（segments） → 每镜一条，按分镜顺序逐段送进剪辑面板
+  // ⚠ 绝不改写 shot(i).videoRel —— 旧代码把拼接片写进 shot(0).videoRel，
+  //   会让第 0 镜的分段视频被整条成片顶掉（再次分段导出/重跑第 0 镜就拿到整条成片）。
+  const exportToEditor = async (indices) => {
+    const all = ctx.store.get().shots || [];
+    const pick = (indices && indices.length ? indices : all.map((_v, i) => i))
+      .filter((i) => Number.isInteger(i) && i >= 0 && i < all.length);
+    // ★ 顺序 = 分镜顺序（下标升序）；多选批量出片时 multiSel 已是升序，这里再保险一次
+    const ordered = [...new Set(pick)].sort((a, b) => a - b);
+    const rels = ordered
+      .map((i) => String((shot(i) && shot(i).videoRel) || "").trim())
+      .filter(Boolean);
+    return exportVideosToEditor(ctx, {
+      rels,
+      exportMode: P.output.exportMode,
+      folder: folder(),
+      log: println,
+    });
   };
   const runAllBtn = h("button", { class: "btn btn-primary", style: { padding: "6px 13px" }, onclick: async () => {
     if (busy) { stopReq = true; runAllBtn.textContent = "停止中…"; return; }
@@ -2378,11 +2397,10 @@ export function createTimelinePanel(ctx) {
       status.textContent = `连跑结束：成功 ${ok}/${shots.length}`;
       runAllBtn.textContent = "▶ 整条连跑";
       busy = false;
-      if (ok > 1 && P.output.exportMode === "all") {
-        const r = await composeIfAll();
-        if (r && r.rel) {
-          if (shots[0]) { shot(0).videoRel = r.rel; }
-        }
+      // ★ 出片结束 → 按导出方式自动送进剪辑面板（全部导出=拼成一整条；分段导出=逐段）
+      //   ok > 0 才做：一段都没成功时不必打扰；只成功 1 段时 exportToEditor 会说明降级
+      if (ok > 0) {
+        try { await exportToEditor(null); } catch (e) { println(`✗ 导出剪辑失败：${e.message}`, "#ffb4b4"); }
       }
     }
   } }, "▶ 整条连跑");
@@ -2415,17 +2433,15 @@ export function createTimelinePanel(ctx) {
         }
       } catch (e) {
         println(`✗ 出片选中异常：${e.message}`, "#ffb4b4");
-      } finally {
-        status.textContent = `出片选中结束：成功 ${ok}/${sel.length}`;
-        syncRunSelBtn();
-        busy = false;
-        if (ok > 1 && P.output.exportMode === "all") {
-          const r = await composeIfAll();
-          if (r && r.rel) {
-            if (shots[sel[0]]) { shot(sel[0]).videoRel = r.rel; }
-          }
-        }
+    } finally {
+      status.textContent = `出片选中结束：成功 ${ok}/${sel.length}`;
+      syncRunSelBtn();
+      busy = false;
+      // 只把**勾选的镜**按分镜顺序导出（sel 已升序，exportToEditor 内部再保险一次）
+      if (ok > 0) {
+        try { await exportToEditor(sel); } catch (e) { println(`✗ 导出剪辑失败：${e.message}`, "#ffb4b4"); }
       }
+    }
     },
   }, "▶ 出片选中");
   const syncRunSelBtn = () => {
@@ -2446,6 +2462,10 @@ export function createTimelinePanel(ctx) {
     const isAll = P.output.exportMode !== "segments";
     exportModeBtn.textContent = isAll ? "🎬 全部导出（拼接）" : "📦 分段导出（独立）";
     exportModeBtn.classList.toggle("btn-primary", isAll);
+    // 把"导出方式的后果"直接写在 tooltip 上 —— 用户最常问的就是"导出后东西去哪了"
+    exportModeBtn.title = isAll
+      ? "全部导出：出片结束后把所有分镜视频**按分镜顺序拼成一整条**，自动导入剪辑面板 V1 轨"
+      : "分段导出：出片结束后每镜一条视频，**按分镜顺序逐段**导入剪辑面板 V1 轨";
   }
   // ⚠ 必须在构造后立刻刷一次：这个按钮创建时**不带文案**，如果只在 onclick 里刷新，
   // 首次打开面板得到的是一个「空文案按钮」——宽 126px 但有 padding 无内容 → 高仅 11px，

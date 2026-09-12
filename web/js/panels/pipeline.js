@@ -9,6 +9,8 @@ import { createLoraControls } from "./lora_controls.js";
 import { pickAssetFolder } from "../core/ui.js";
 import { stripVirtualRefs, isUsableRel } from "../core/purify.js";
 import { assetRegistry } from "../core/assets.js";
+// 出片结果 → 剪辑面板的**统一实现**（与「时间线」导演台共用；语义见 core/editor_io.js）
+import { exportVideosToEditor } from "../core/editor_io.js";
 
 export function createPipelinePanel(ctx) {
   const s = ctx.store;
@@ -252,6 +254,9 @@ export function createPipelinePanel(ctx) {
           const h3mode = h3Sel.value;
           // 上下文引导 checkbox 引用（在 if 外声明，供后续日志和实际执行使用）
           const linkAllCk = document.getElementById("pipeline-link-all");
+          // 逐镜出片结果（**按分镜顺序**收集）——在 if 外声明，跑完交给 exportVideosToEditor
+          // 决定"拼成一整条"还是"逐段"送进剪辑面板
+          const h3Rels = [];
           if (h3mode !== "off") {
             if (linkAllCk && linkAllCk.checked) {
               const shots = sp.shots || [];
@@ -322,6 +327,7 @@ export function createPipelinePanel(ctx) {
                     println(`    🎙 台词 ${r.dialogues.length} 句：${d.slice(0, 120)}${d.length > 120 ? "…" : ""}`, "#c9b6ff");
                   }
                   println(`    ✓ 第 ${sh.index} 镜 → input/${r.rel}（${h3mode} · 构图 ${r.graph_kind || "-"}）`, "#8ff0c0");
+                  if (r.rel) h3Rels.push(r.rel);   // 顺序 = 分镜顺序
                 } else {
                   println(`    ✗ 第 ${sh.index} 镜：${r.error}`, "#ffb4b4");
                 }
@@ -336,7 +342,28 @@ export function createPipelinePanel(ctx) {
             (linkAllCk && linkAllCk.checked ? " · 上下文引导已开启" : ""), "#8ff0c0");
           println(h3mode === "off"
             ? "（未开 H3 出片；去「时间线」逐镜或连跑即可）"
-            : "✅ 全部视频已自动导入到「剪辑」面板素材库，可直接拖入轨道合成。");
+            : (s.get().exportMode === "segments"
+              ? "✅ 每镜一段视频将按分镜顺序自动加入「剪辑」面板 V1 轨…"
+              : "✅ 将自动拼成一整条视频并加入「剪辑」面板 V1 轨…"));
+
+          // ⑦ 按「导出方式」把出片结果送进剪辑面板（与时间线导演台同一个实现）。
+          //    · 全部导出 → 拼成一整条，只把这一条入 V1 轨
+          //    · 分段导出 → 每镜一条，按分镜顺序逐段入 V1 轨
+          //    以前这里**什么都不做**，日志却写着"全部视频已自动导入" → 用户以为导出失效。
+          //    ⚠ 必须放在上面**打印完总结之后**：这一步会切到「剪辑」面板，
+          //      先打印才能让用户看到"完成：N 镜…"这行（面板实例是缓存的，切回来日志还在）。
+          if (h3mode !== "off" && h3Rels.length) {
+            try {
+              await exportVideosToEditor(ctx, {
+                rels: h3Rels,
+                exportMode: s.get().exportMode,
+                folder,
+                log: println,
+              });
+            } catch (e) {
+              println(`    ✗ 导出到剪辑面板失败：${e.message}`, "#ffb4b4");
+            }
+          }
         } catch (e) {
           println("✗ 流水线异常：" + e.message, "#ffb4b4");
         } finally {

@@ -70,6 +70,12 @@ export function mountApp(shadow, node) {
     vidH: 1280,
     vidMP: 0,     // >0 = 按 MiniMax H3 官方「百万像素」出片（0.1–2），宽高由该值+比例算出
     vidOrient: "auto", // MP 出片的朝向：auto（沿用当前比例）/ portrait（竖屏 h>w）/ landscape（横屏 w>h）
+    // 时间线 → 剪辑面板的「待入轨视频队列」（**按分镜顺序**）：
+    //   全部导出 = [拼接成一整条的那一条]；分段导出 = [第1镜, 第2镜, …]
+    //   时间线一次写一整批 → 剪辑面板 refreshMaterials 一次消费完（顺序即轨道顺序）。
+    //   pendingEditorVideo（单条）是旧通道，保留兼容（右键「去剪辑」走同一队列）。
+    pendingEditorVideos: [],
+    pendingEditorVideo: null,
     // H3 官方 output 三开关（导演台「⚙ 采样设置 / 🎙️ 声音」页 ↔ 一键流水线共享）
     exportMode: "all",       // all = 整条拼接导出；segments = 每镜独立分段导出
     continuity: false,       // continuityEnabled：段间用重叠帧衔接
@@ -111,7 +117,15 @@ export function mountApp(shadow, node) {
     if (dirty) { store.set(patch); console.log("[MRBoardNext] 已自动清洗正文中的机器文件名 token"); }
   })();
   store.subscribe((st) => {
-    try { localStorage.setItem(STORE_LS_KEY, JSON.stringify(st)); } catch (_) {}
+    try {
+      // 「待入轨视频队列」是**瞬时**状态（时间线写入 → 切到剪辑面板立刻消费掉），
+      // 不进 localStorage：否则刷新页面 / 重开面板时会把上一次的队列当成新的导入请求，
+      // 把已经入过轨的视频再塞一遍 V1（重复片段）。
+      const transient = new Set(["pendingEditorVideos", "pendingEditorVideo"]);
+      const keep = {};
+      for (const k of Object.keys(st || {})) if (!transient.has(k)) keep[k] = st[k];
+      localStorage.setItem(STORE_LS_KEY, JSON.stringify(keep));
+    } catch (_) {}
   });
 
   const content = h("div", { class: "mx-content" });

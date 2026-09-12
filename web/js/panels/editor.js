@@ -344,21 +344,36 @@ export function createEditorPanel(ctx) {
         ctx.toast("素材扫描失败: " + e.message, true);
       }
       renderMats();
-      // 接收时间线「去剪辑」发来的视频：自动加到 V1 轨并预览
-      const pending = ctx.store.get().pendingEditorVideo;
-      if (pending) {
-        ctx.store.set({ pendingEditorVideo: null });
-        const m = materials.find((x) => x.rel === pending);
-        if (m && m.kind === "video") {
-          addToTrack(v1, m);
-          selected = { row: null, idx: -1, obj: m };
-          showVideo(m.rel);
+      // 接收时间线发来的视频：
+      //   · pendingEditorVideos（数组）= **按分镜顺序**的一批 → 逐条 addToTrack，顺序即轨道顺序
+      //     （全部导出=1 条拼接成片；分段导出=N 段）
+      //   · pendingEditorVideo（单个）= 旧的单条通道（「去剪辑」右键菜单），保持兼容
+      // 队列用数组而不是 N 次单条写入：时间线一次出片结束就写一整批，剪辑面板一次消费完，
+      // 不会出现"第 2 段到了第 1 段还没入库"的乱序。
+      const q = ctx.store.get().pendingEditorVideos;
+      const pending = Array.isArray(q) && q.length
+        ? q.slice()
+        : (ctx.store.get().pendingEditorVideo ? [ctx.store.get().pendingEditorVideo] : []);
+      if (pending.length) {
+        ctx.store.set({ pendingEditorVideos: null, pendingEditorVideo: null });
+        const added = [];
+        const missing = [];
+        for (const rel of pending) {
+          const m = materials.find((x) => x.rel === rel);
+          if (m && m.kind === "video") { addToTrack(v1, m); added.push(m); }
+          else missing.push(rel);
+        }
+        if (added.length) {
+          selected = { row: null, idx: -1, obj: added[0] };
+          showVideo(added[0].rel);
           renderMats();
           renderTracks();
           renderEdit();
-          ctx.toast("已加入 V1 轨：" + m.name);
+          ctx.toast(`已按分镜顺序加入 V1 轨 ${added.length} 段`
+            + (missing.length ? `（${missing.length} 段未在素材库找到）` : ""));
         } else {
-          ctx.toast("未在素材库找到该视频：" + pending, true);
+          ctx.toast("未在素材库找到这些视频：" + missing.slice(0, 2).join("、")
+            + (missing.length > 2 ? " …" : ""), true);
         }
       }
     } finally {
