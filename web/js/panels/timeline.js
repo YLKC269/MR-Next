@@ -678,11 +678,11 @@ export function createTimelinePanel(ctx) {
       renderPreset();
       // 画质档位（对齐社区"预览归预览、成片归成片"两套工作流）。
       // 公共基线：res_multistep + simple + cfg=1（引导蒸馏）+ shift 12/3（训练值）。
-      // 预览 = SageAttention + 蒸馏 LoRA 低步数；成片 = SageAttention + 16–20 步原生采样 + 二采。
-      // 采样统一走官方单时钟（双时钟已摘除）。
+      // 预览 = 蒸馏 LoRA 低步数；成片 = 16–20 步原生采样 + 二采。
+      // 采样统一走官方单时钟（双时钟已摘除）；加速开关由「⚡ 加速」页显式控制，档位不动它。
       const QUALITY_PRESETS = [
         { key: "draft", label: "⚡ 草稿 6步", steps: 6, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 1.0, upscale: "off", turbo: true,
-          tip: "社区预览方案：SageAttention + 蒸馏 LoRA 6 步。最快，只用于验证构图/动作/台词。低步数音轨易失真，已由「声音」页音频护栏自动抬到安全步数" },
+          tip: "社区预览方案：蒸馏 LoRA 6 步。最快，只用于验证构图/动作/台词。低步数音轨易失真，已由「声音」页音频护栏自动抬到安全步数" },
         { key: "standard", label: "⚖ 标准 16步", steps: 16, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "off", turbo: false,
           tip: "社区基线：res_multistep + simple + cfg=1。实测低于 ~15 步画质明显下降，16 步是画质/速度均衡点" },
         { key: "final", label: "✨ 成品 20步", steps: 20, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "auto", turbo: false,
@@ -703,10 +703,9 @@ export function createTimelinePanel(ctx) {
               P.output.cfg = q.cfg; P.output.shift_video = q.sv; P.output.shift_audio = q.sa;
               P.output.upscale_mode = q.upscale || "off";
               const notes = [];
-              // 社区加速哲学：SageAttention 近乎无损、成片可开；档位一键带上（后端不可用会自动降级）
-              const _sageBad = P.speed.accelInfo && P.speed.accelInfo.sage && P.speed.accelInfo.sage.available === false;
-              if (!_sageBad && P.speed.accel !== "sage") { P.speed.accel = "sage"; notes.push("SageAttention 已开（社区首选 · 近乎无损 · 2–4×）"); }
-              if (_sageBad && P.speed.accel === "sage") { P.speed.accel = "off"; notes.push("本机 SageAttention 不可用 → 保持关闭"); }
+              // ⚠ 档位**不改加速开关**：加速属于「⚡ 加速」页的显式选择。
+              // （历史上档位自动开 SageAttention，让用户在不知情的情况下换了采样路径；
+              //   而且一旦加速路径与当前 ComfyUI/量化模型不兼容就直接采样失败。）
               // 蒸馏 LoRA 只属于预览档（社区结论：损伤音质，不进成片）—— 切标准/成品自动关掉
               if (q.turbo) {
                 P.speed.loraS = q.turboS || 1;

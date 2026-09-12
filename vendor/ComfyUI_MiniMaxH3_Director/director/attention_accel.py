@@ -327,6 +327,42 @@ def _to_hnd(raw, ref):
     return raw
 
 
+def _restore_output_layout(t, ref, kwargs):
+    """把加速后的输出**还原成调用方契约要求的形状**（镜像 ComfyUI 原生实现）。
+
+    ComfyUI 的原生容器实现 ``_attention_comfy_kitchen_int8_containers`` 末尾是：
+
+        if not skip_output_reshape:
+            out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+        return out
+
+    也就是说 ``skip_output_reshape`` 默认 False → **返回 3D ``[B, S, H*D]``**，
+    只有显式 ``True`` 才返回 HND ``[B, H, S, D]``。
+
+    H3 的 ``Attention.forward`` 正是这种调用方：它把返回值直接交给
+    ``self.out_proj(out.squeeze(0))``，而 ``out_proj = Linear(heads*head_dim, hidden)``
+    —— 必须拿到 ``[S, H*D]``。
+
+    ⚠ 本模块以前**无条件**返回 HND（见 ``_to_hnd`` 的老注释），于是 ``out_proj``
+    收到的 k 是 head_dim 而不是 heads*head_dim → comfy_kitchen int8 后端断言
+    ``Input and weight inner dimensions must match``（现象：H3 采样第一步就崩，
+    且报错信息完全不提 attention）。这是「开 sage 加速就采样失败」的真凶。
+    """
+    try:
+        if t is None or not hasattr(t, "dim"):
+            return t
+        if kwargs.get("skip_output_reshape", False):
+            return t                      # 调用方明确要 HND → 原样返回
+        b, h, s, d = (int(x) for x in ref.shape)   # ref 是 HND [B,H,S,D]
+        if t.dim() == 4 and int(t.shape[0]) == b and int(t.shape[2]) == s:
+            return t.transpose(1, 2).reshape(b, s, h * d)
+        if t.dim() == 3 and int(t.shape[1]) == s and int(t.shape[2]) == h * d:
+            return t                      # 已经是 [B, S, H*D]
+    except Exception:  # noqa: BLE001 - 布局还原失败也绝不阻断出片
+        return t
+    return t
+
+
 def _call_native(func, q, k, v, heads, kwargs):
     """回退官方 attention。
 
@@ -393,7 +429,8 @@ def build_attention_override(mode: str, *, sparsity: float = 0.0, min_seq: int =
     def _override(func, q, k, v, heads, **kwargs):
         out = _run(q, k, v, int(heads), **kwargs)
         if out is not None:
-            return out
+            # sage / block_sparse 出 HND → 按调用方契约还原（默认要 [B, S, H*D]）
+            return _restore_output_layout(_to_hnd(out, q), q, kwargs)
         return _call_native(func, q, k, v, heads, kwargs)
 
     def _override_containers(q, k, v, heads, **kwargs):
@@ -401,9 +438,10 @@ def build_attention_override(mode: str, *, sparsity: float = 0.0, min_seq: int =
 
         ⚠ `wrap_attn` 对 container_function 通道是**原样转发**，不像默认通道那样
         会 `take()` 后再调 —— 所以这里返回什么形状，调用方就拿到什么形状。
-        H3 的 `Attention.forward` 期望的就是 `skip_reshape=True` 语义的
-        ``[B, H, S, D]``。原生回退会按 `skip_output_reshape` 出
-        ``[B, S, H*D]``；为保持一致，这里**规整回 HND**。
+
+        布局契约（必须与 ComfyUI 原生 ``_attention_comfy_kitchen_int8_containers``
+        一致）：内部按 HND 计算，返回前交给 ``_restore_output_layout`` 还原 ——
+        ``skip_output_reshape=False``（H3 的用法）→ ``[B, S, H*D]``；显式 True → HND。
         """
         from comfy.ldm.modules.attention import AttentionTensorContainer
 
@@ -436,7 +474,7 @@ def build_attention_override(mode: str, *, sparsity: float = 0.0, min_seq: int =
                 heads,
                 kwargs,
             )
-        return _to_hnd(raw, qq)
+        return _restore_output_layout(_to_hnd(raw, qq), qq, kwargs)
 
     _override.__name__ = f"mrnext_h3_accel_{mode}"
     _override._mrnext_accel_mode = mode  # type: ignore[attr-defined]
