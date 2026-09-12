@@ -561,6 +561,18 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 .tl-ruler { flex: 0 0 auto; display: flex; align-items: flex-end; min-height: 13px; padding: 0 3px; color: #5f7392; font-size: 9px; }
 .tl-tick { flex: 0 0 auto; height: 10px; line-height: 10px; padding-left: 2px; border-left: 1px solid rgba(120,170,255,.18); white-space: nowrap; }
 .tl-track { flex: 0 0 auto; display: flex; align-items: center; min-height: 0; padding: 1px 3px; }
+/* 轨道横向滚动条：分镜变多时靠它滑动查看（用户要求"多出来的分镜可以滑块滑动"）。
+   Chromium 里 ::-webkit-scrollbar 生效；给足高度并做亮色 thumb，别用默认那种又细又暗的。 */
+.tl-scroll { scrollbar-width: thin; }
+.tl-scroll::-webkit-scrollbar { height: 11px; }
+.tl-scroll::-webkit-scrollbar-track { background: rgba(10,18,36,.6); border-radius: 6px; }
+.tl-scroll::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #3d5d8c, #2a4166); border-radius: 6px;
+  border: 2px solid rgba(10,18,36,.9);
+}
+.tl-scroll::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, #4f79b3, #35507c); }
+/* 轨道内容用 nowrap 撑开 → 超出宽度时由上面的滚动条承载，而不是把面板顶宽 */
+.tl-scroll > .tl-track, .tl-scroll > .tl-ruler { width: max-content; }
 .tl-block { flex: 0 0 auto; background: linear-gradient(180deg, #1e4070, #12263f); border: 1px solid #2f6ca0;
   border-radius: 7px; padding: 2px 6px 2px 26px; cursor: pointer; color: #cfe4f7; display: flex; flex-direction: column;
   justify-content: center; gap: 0; min-width: 110px; box-shadow: inset 0 1px 0 var(--panel-hi), 0 2px 8px rgba(0,0,0,.3);
@@ -922,7 +934,10 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 .mm-preview { flex: 0 0 var(--mm-pv); width: var(--mm-pv);
   min-width: var(--mm-pv); max-width: var(--mm-pv);
   height: var(--mm-pv); min-height: var(--mm-pv); max-height: var(--mm-pv);
-  /* 紧贴提示词框：不要 margin-left:auto（那是把它推到最右边、中间留一大片空） */
+  /* 间距由外层 .mm-pv-col 给（出片按钮组 + 预览框 同列），这里不再自带左边距 */
+  margin-left: 0; }
+/* 右列：出片按钮组（在上） + 实时预览框（在下）—— 点完出片立刻能在正下方看结果 */
+.mm-pv-col { display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto; align-items: stretch;
   margin-left: 10px; }/* 预览框紧贴提示词（不再 margin-left:auto 推到最右） */
 .mm-pv-title { font-size: clamp(10px, .95cqw, 11.5px); }
 /* 剪辑轨道：随高度自适应，标尺不挤 */

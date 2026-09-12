@@ -1636,6 +1636,13 @@ export function createTimelinePanel(ctx) {
       h("input", { type: "checkbox", checked: c.linkNext ? "checked" : null, style: { accentColor: "#ffd166" } }),
       h("span", { style: { fontSize: 11, color: "#ffcf6b" } }, "衔接下镜"));
     contCtl.querySelector("input").onchange = (e) => { c.linkNext = e.target.checked; renderTrack(); };
+  // 本镜操作按钮组：出片 + 复制/重置/删除 —— 放到**实时预览框正上方**（用户要求：
+  // 出片按钮紧贴预览框，点完立刻看结果；也把顶部那行让给「镜号/时长/衔接」）。
+  const shotActions = h("div", { class: "row", style: { gap: 4, flexWrap: "wrap", justifyContent: "flex-end", width: "100%" } },
+    runBtnFor(i),
+    h("button", { class: "btn", style: { padding: "5px 10px" }, title: "复制本镜（素材参数 + 提示词）为一个新分镜", onclick: () => duplicateShot(i) }, "⧉ 复制"),
+    h("button", { class: "btn", style: { padding: "5px 10px" }, onclick: () => { delete shotsCfg[i]; renderAll(); } }, "重置"),
+    h("button", { class: "btn", style: { padding: "5px 10px" }, onclick: () => removeShot(i) }, "删除"));
   // 撑满时间线面板剩余高度：编辑区（素材宫格 + 提示词 + 预览）随面板变高而变高，
   // 消除面板下方大片空白；面板变矮时整块由 editorHost 内部滚动。
   return h("div", { class: "col", style: { gap: 6, borderTop: "1px solid #1d2b44", paddingTop: 6,
@@ -1653,14 +1660,10 @@ export function createTimelinePanel(ctx) {
         : null,
       secCtl,
       globalSecBtn,
-      contCtl,
-      h("div", { class: "mx-spacer" }),
-      runBtnFor(i),
-        h("button", { class: "btn", style: { padding: "5px 10px" }, title: "复制本镜（素材参数 + 提示词）为一个新分镜", onclick: () => duplicateShot(i) }, "⧉ 复制"),
-        h("button", { class: "btn", style: { padding: "5px 10px" }, onclick: () => { delete shotsCfg[i]; renderAll(); } }, "重置"),
-        h("button", { class: "btn", style: { padding: "5px 10px" }, onclick: () => removeShot(i) }, "删除")),
-      // 编辑器三栏：素材九宫格（t2v 无） + 提示词 + 实时预览框（定死正方形，恒定占位不跳版）
-      h("div", { class: "mm-split" }, mediaPane, promptPane, previewBox));
+      contCtl),
+    // 编辑器三栏：素材九宫格（t2v 无） + 提示词 + [出片按钮组 + 实时预览框]（右列）
+    h("div", { class: "mm-split" }, mediaPane, promptPane,
+      h("div", { class: "mm-pv-col" }, shotActions, previewBox)));
   };
 
   // ---------- 出片 ----------
