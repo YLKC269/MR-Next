@@ -572,7 +572,18 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
 }
 .tl-scroll::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, #4f79b3, #35507c); }
 /* 轨道内容用 nowrap 撑开 → 超出宽度时由上面的滚动条承载，而不是把面板顶宽 */
-.tl-scroll > .tl-track, .tl-scroll > .tl-ruler { width: max-content; }
+.tl-scroll > .tl-track, .tl-scroll > .tl-ruler { width: max-content; flex-wrap: nowrap; }
+/* 分镜块一律单行不换行：超过可视宽度就"裁剪 + 用滑块滑动"（用户要求），
+   底部留出滚动条高度，避免块被滑块压住 */
+.tl-scroll { padding-bottom: 8px; }
+/* 「超过 7 块自动裁剪」：JS 量出第 7 块的右边缘后写入 max-width（见 timeline.js 的
+   capScrollToVisible）。.tl-capped 只是给一个视觉态：滑块常显、边框强调一下，
+   让用户一眼看出"这里可以横向滑"。 */
+.tl-scroll.tl-capped { overflow-x: scroll; border-color: rgba(120,170,255,.45); }
+.tl-scroll.tl-capped::-webkit-scrollbar { height: 12px; }
+.tl-capped-note { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 10.5px; padding: 0 4px; line-height: 1.5; }
+.tl-capped-note:empty { display: none; }
 .tl-block { flex: 0 0 auto; background: linear-gradient(180deg, #1e4070, #12263f); border: 1px solid #2f6ca0;
   border-radius: 7px; padding: 2px 6px 2px 26px; cursor: pointer; color: #cfe4f7; display: flex; flex-direction: column;
   justify-content: center; gap: 0; min-width: 110px; box-shadow: inset 0 1px 0 var(--panel-hi), 0 2px 8px rgba(0,0,0,.3);

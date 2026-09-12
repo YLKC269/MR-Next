@@ -646,6 +646,121 @@ def _inject_live_preview(widget, opts) -> None:
         pass
 
 
+def _truncate_timeline_to_single(widget, prompt, seconds, frame_rate) -> None:
+    """单镜出片（面板逐镜 / 流水线）必须让时间线**只有一段**，且提示词写实。
+
+    ★ 为什么要裁段：官方 example 模板自带 **3–4 段演示分镜** ——
+      · `external_groups_i2v.json`（fl2v 时间线）：
+        猴子在快速奔跑 → 卡通猴子坐在岩石上打招呼 → 动漫美女走出房间 → 办公室实拍融合动画
+      · `external_groups_r2v.json`：
+        男孩三视图(带 demo refs) → 手机 → 女性 g1 → 可口可乐替换
+    旧行为只做"深替换提示词"、段数照旧 → **渲出来的视频里会混进这些演示内容**
+    （用户长期反馈的"人物乱入"就是这个）。而且官方是「按顺序把参考组配给段」，
+    单镜只挂了 1 个组 → 只有第 0 段拿到我们的参考，其余段的音色/参考全部失效。
+
+    ★ 为什么单段也要处理：官方 `build_gen_director_plan` 里
+    `prompt = global_block.get("prompt") or global_prompt`，且 `editMode == "global"`
+    时 `seg_prompt = prompt`（**完全忽略 `segments[0].prompt`**）——
+    所以 t2v 的提示词必须落在 `global.prompt`；但面板/预览是**按段渲染**的，
+    只写 global 会让分镜卡片显示空白。两条都写 → 引擎与 UI 同时正确。
+
+    ★ 为什么还要动 shots / keyframes：时间线是一份数据、**三套并行表示**，
+    官方不同 builder 各读一套（都是实读源码确认的）：
+      · `segments`   → `gen_timeline.build_gen_director_plan`、`plan.build_director_plan`
+      · `shots`      → `fl2v_timeline.build_fl2v_director_plan`（L562 **优先**于 keyframes）
+                       + `segment_continuity.timeline_row_for_index` 的兜底行
+      · `keyframes`  → `fl2v_timeline`（shots 为空时经 `_expand_shots` 展开）
+    模板实测：`external_groups_i2v.json` = segments 4 / **shots 4 / keyframes 6**
+    （猴子·卡通猴子·美女·办公室，shot 里还挂着 0059.png/0062.png/Anima_00392_.png
+    演示图）；`external_groups_r2v.json` = **segments 4**。只裁 `segments` 会留下
+    另外两套演示数据 —— 一旦官方走 fl2v builder（例如面板切任务类型）就会原样渲出来。
+    所以这里把三套表示一起归一成"1 段"，演示素材（图片/音色/视频）全部清空。
+    """
+    try:
+        td = json.loads(str(widget.get("timeline_data") or "{}"))
+    except Exception:  # noqa: BLE001
+        return
+    if not isinstance(td, dict):
+        return
+    segs = td.get("segments") or []
+    if not segs:
+        return
+    try:
+        sec = float(seconds or 5.0)
+    except (TypeError, ValueError):
+        sec = 5.0
+    ln = _frame_count(sec, float(frame_rate or 24.0))
+    multi = len(segs) > 1
+
+    seg = dict(segs[0])            # 保留模板首段的字段结构（taskType/genImage/…），只换内容
+    seg["start"] = 0
+    seg["length"] = ln
+    seg["frameCount"] = ln
+    seg["durationSec"] = sec
+    seg["prompt"] = prompt
+    if multi:
+        # 多段（external_groups 模板）→ 演示段的参考素材（demo 图片/音色）必须清掉，
+        # 否则会被当作真实参考载入（r2v demo 段自带 Gemini/krea2 演示图）。
+        seg["refs"] = []
+        seg["refAudios"] = []
+        seg["refVideos"] = []
+    td["segments"] = [seg]
+
+    # ── 并行表示 ①：shots（fl2v builder 的第一优先来源） ──────────────────
+    # 官方 `_normalize_shots` schema：{id, durationSec, prompt, negativePrompt,
+    # startImage, endImage}；start/end 都为空 = 纯文本镜（正合单镜语义：
+    # 首尾帧由外面的 Group 节点供给，不该再由时间线塞演示图）。
+    old_shots = td.get("shots")
+    if isinstance(old_shots, list) and old_shots:
+        s0 = dict(old_shots[0]) if isinstance(old_shots[0], dict) else {}
+        s0.setdefault("id", "shot0")
+        s0["durationSec"] = sec
+        s0["prompt"] = prompt
+        s0["startImage"] = None
+        s0["endImage"] = None
+        s0.pop("continuityFromPrev", None)
+        s0.pop("continuity_from_prev", None)
+        td["shots"] = [s0]
+
+    # ── 并行表示 ②：keyframes（shots 为空时的展开源） ────────────────────
+    old_kf = td.get("keyframes")
+    if isinstance(old_kf, list) and old_kf:
+        k0 = dict(old_kf[0]) if isinstance(old_kf[0], dict) else {}
+        k0.setdefault("id", "kf0")
+        k0["start"] = 0
+        k0["length"] = ln
+        k0["frameCount"] = ln
+        k0["durationSec"] = sec
+        k0["prompt"] = prompt
+        k0["imageFile"] = ""
+        # 不给 isStartFrame → `_expand_shots` 不会把它当可跑组（演示图已清空，
+        # 没有真实首尾帧可锁）；真正的源帧由外接 Group 节点提供。
+        k0["isStartFrame"] = False
+        k0["isEndFrame"] = False
+        td["keyframes"] = [k0]
+
+    # ★「选择运行」必须一起关掉！`external_groups_r2v.json` 模板是
+    #   `runSelectEnabled: true, runSelection: [0, 1, 2]`（4 段里只跑 3 段 ——
+    #   这也是"演示内容混进成片"的第二条通道）。单镜只剩 1 段时：
+    #     · 只清 runSelection 而留着 runSelectEnabled=true →
+    #       官方 `_parse_run_selection` 算出空集合，**直接抛错**
+    #       「「选择运行」已开启但未勾选任何片段/提示词组」（用户会看到出片直接失败）
+    #     · runSelectEnabled=false + runSelection=[] → 官方判定"全跑"，
+    #       对唯一的一段来说正是期望语义。
+    if multi or td.get("runSelectEnabled") or td.get("runSelection"):
+        td["runSelectEnabled"] = False
+        td["runSelection"] = []
+    if multi:
+        td["durationSec"] = sec
+    td["totalFrames"] = ln
+    if str(td.get("editMode") or "global") == "global":
+        g = td.get("global")
+        if isinstance(g, dict):
+            g["prompt"] = prompt
+    widget["timeline_data"] = json.dumps(td, ensure_ascii=False)
+    widget["total_frames"] = ln
+
+
 def build_timeline_from_shots(shots, *, task_type, frame_rate=24.0, width=864, height=480,                              common_prompt="", continuity=False, continuity_overlap=22,
                               export_mode="all", audio_mode="generate",
                               ref_image_size="match") -> dict:
@@ -837,6 +952,11 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
         widget["timeline_data"] = json.dumps(_td_multi, ensure_ascii=False)
         widget["total_frames"] = int(_td_multi["totalFrames"])  # 防被后续 sync 写回模板值
         widget["global_prompt"] = ""   # 每段各带 prompt，global 留空避免重复注入
+    # ★ 单镜路径（面板逐镜出片 / 流水线）：时间线必须**只有一段** ——
+    #   官方 r2v / i2v 的 external_groups 模板自带 3–4 段演示分镜，不裁掉就会渲进成片
+    #   （"人物乱入"）且挤掉我们的参考（官方按顺序把组配给段）。
+    if not shots:
+        _truncate_timeline_to_single(widget, prompt, seconds, frame_rate)
     # H3 官方百万像素（0.1–2）：按当前比例换算出宽高（与前端同一算式，后端兜底 → 一定生效）
     _mp = opts_obj.get("megapixels")
     if _mp:
@@ -885,6 +1005,12 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             if orig_total != total and orig_total >= 100:
                 td = _deep_replace_num(td, orig_total, total)
             widget["timeline_data"] = json.dumps(td, ensure_ascii=False)
+            # ★ 最后一步：把**最终**提示词（含公共提示词）与帧数显式写进
+            #   segments / global.prompt / shots / keyframes。
+            #   深替换只能覆盖"模板文本出现过的地方"；而引擎读的是
+            #   `global_block.get("prompt") or global_prompt`，不显式写就会漏掉公共提示词
+            #   （深替换拿的是拼接前的 prompt，先写后拼 → global 里只有本镜那一半）。
+            _truncate_timeline_to_single(widget, prompt, seconds, frame_rate)
         d_ins = {"model": link(u), "video_vae": link(vv), "audio_vae": link(av), "clip": link(c)}
         d_ins.update(widget)
         maybe_refine(d_ins, u)
@@ -1041,6 +1167,15 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             prompt = _renumber(prompt, "Audio", aud_rename)
         if video_by_num:
             prompt = _renumber(prompt, "Video", vid_rename)
+        # ★ 挂了音色但正文没写 <Audio N> → 自动补一行标记。
+        #   官方 `reinforce_r2v_prompt`（plan.py L502）只在**完全找不到 "<Audio"** 时才
+        #   在句首补，补出来的标记对用户是不可见的；而正文里显式写着标记，
+        #   用户在面板/预览里就能**亲眼确认音色被引用了**（用户长期反馈"音色参考
+        #   一直不被引用"很大一部分是"看不到绑定"造成的体感）。
+        #   官方函数有 `"<Audio" not in text` 守卫 → 这里补了也不会被重复补。
+        if aud_rels and not re.search(r"<\s*Audio\s*\d+\s*>", prompt, re.I):
+            prompt = prompt.rstrip() + "\n音色参考：" + " ".join(
+                "<Audio %d>" % (k + 1) for k in range(len(aud_rels)))
         # Director 的 global_prompt 也用改号后的提示词（它是 fallback/公共段来源，
         # 留着旧标记会在 common 模式下重新引入对不上的 <Picture N>/<Audio N>）
         widget["global_prompt"] = prompt

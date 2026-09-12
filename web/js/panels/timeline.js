@@ -306,7 +306,8 @@ export function createTimelinePanel(ctx) {
   let openTab = null; // mode/model/sample/speed —— 官方分组
   let logOpen = false;
   let shotPreview = { idx: -1, rel: null }; // 最近出片结果（供编辑器实时预览框）
-  let livePreviewUrl = null; // 生成过程中的实时预览图 URL（采样中轮询）
+  let livePreviewUrl = null; // 生成过程中的实时预览图 URL（旧轮询兜底）
+  let wsPreviewUrl = null;   // 官方引擎经 websocket 推来的 TAE 实时预览（优先显示）
   // 本次出片的起始时间戳（epoch 秒）：只接受"本次开始之后"写的预览图，
   // 否则会把上一轮 / 别的模式留下的旧预览图当成实时预览显示（用户会以为"还在用以前的参考图"）。
   let previewRunSince = 0;
@@ -330,7 +331,7 @@ export function createTimelinePanel(ctx) {
     ctx.api.listenDirectorPreview((d) => {
       try {
         if (!d || !d.image_b64) return;
-        livePreviewUrl = "data:image/jpeg;base64," + d.image_b64;
+        wsPreviewUrl = "data:image/jpeg;base64," + d.image_b64;
         if (typeof previewPainter === "function") previewPainter();
       } catch (_) { /* 预览失败不影响出片 */ }
     });
@@ -342,6 +343,40 @@ export function createTimelinePanel(ctx) {
   // 轨道内容撑开，分镜越多面板越宽，编辑区/实时预览被挤到可视区外。限宽后
   // overflow-x:auto 生效，轨道在固定宽度内横向滚动，下方编辑区布局不再随分镜数漂移。
   const scroll = h("div", { class: "tl-scroll", style: { width: "100%", minWidth: 0 } }, ruler, track);
+  // ★ 「超过 7 块自动裁剪 + 滑块滑动」：
+  //   分镜块宽是按时长算的（sec * PX），块一多轨道就无限长 —— 上限值太大则面板横着
+  //   溢出，太小又看不出全景。这里定死**可见 7 块**：整完轨后量出「第 7 块右边缘」
+  //   的像素位置，把它设成 scroll 容器的 max-width；第 8 块起全部落在滚动区里，
+  //   由 .tl-scroll 的横向滑块（可见滚动条）滑出来。≤7 块时清掉 maxWidth，正常铺满。
+  const MAX_VISIBLE_SHOTS = 7;
+  let capToken = 0;                      // 每次 renderTrack 递增 → 上一轮的补救循环自动退出
+  const capScrollToVisible = () => {
+    const blocks = Array.from(track.querySelectorAll(".tl-block"));
+    const my = ++capToken;
+    if (blocks.length <= MAX_VISIBLE_SHOTS) {
+      scroll.style.maxWidth = "";
+      scroll.classList.remove("tl-capped");
+      return;
+    }
+    scroll.classList.add("tl-capped");
+    // 面板被隐藏（切到别的页签 / display:none）时量到的是 0 → 不能只试一帧就放弃，
+    // 有限次补救试到布局出来为止（30 帧 ≈ 0.5s，够页面切回来）。
+    let tries = 0;
+    const measure = () => {
+      if (my !== capToken) return;       // 面板已重渲染 → 手动放弃，别写脏值
+      tries += 1;
+      const rail = track.getBoundingClientRect();
+      const edge = blocks[MAX_VISIBLE_SHOTS - 1].getBoundingClientRect();
+      if (rail.width && edge.width) {
+        scroll.style.maxWidth = (Math.ceil(edge.right - rail.left) + 8) + "px";
+        return;
+      }
+      if (tries < 30) requestAnimationFrame(measure);
+    };
+    measure();
+  };
+  // 轨道下方的「裁剪提示条」：只在超过 7 块时显示，告诉用户后面还有内容、怎么滑
+  const capped = h("div", { class: "tl-capped-note" });
   const tabBar = h("div", { class: "tl-tabs" });
   const paramRow = h("div", { class: "tl-parambox" });
   const editorHost = h("div", { class: "col", style: { flex: "0 0 auto" } });
@@ -1600,7 +1635,7 @@ export function createTimelinePanel(ctx) {
     const previewBox = h("div", { class: "mm-preview" }, pvTitle, pvBody, pvFoot);
     // 就地重绘预览内容：只换 pvBody/pvFoot 子节点，不碰提示词编辑器（不丢焦点、不跳版）
     const paintPreview = () => {
-      const live = livePreviewUrl;
+      const live = wsPreviewUrl || livePreviewUrl;   // ws(TAE) 优先，轮询兜底
       const rel = shotPreview.idx === i ? shotPreview.rel : null;
       pvTitle.textContent = live ? "生成中…（采样预览）" : rel ? "出片预览" : "实时预览";
       pvTitle.style.color = live ? "#7ee2a0" : rel ? "#7ee2a0" : "";
@@ -2065,6 +2100,7 @@ export function createTimelinePanel(ctx) {
     // 模式 / 别的镜）留在预览目录里的旧图当成"本次实时预览"显示，看起来就像"还在用以前的参考图"。
     if (previewTimer) clearInterval(previewTimer);
     livePreviewUrl = null;
+    wsPreviewUrl = null;
     previewRunSince = Date.now() / 1000 - 1; // 留 1s 余量给时钟误差
     try { if (previewPainter) previewPainter(); } catch (_) { /* 预览框还没建好，忽略 */ }
     previewTimer = setInterval(() => {
@@ -2499,6 +2535,9 @@ export function createTimelinePanel(ctx) {
       );
       track.appendChild(hint);
       ruler.appendChild(h("div", { class: "tl-tick" }, "总长 0.0s"));
+      scroll.style.maxWidth = "";
+      scroll.classList.remove("tl-capped");
+      clear(capped);
       return;
     }
     let cursor = 0;
@@ -2571,6 +2610,18 @@ export function createTimelinePanel(ctx) {
     const addB = h("button", { class: "btn tl-add", onclick: appendShot }, "＋ 分镜");
     track.appendChild(addB);
     ruler.appendChild(h("div", { class: "tl-tick" }, `总长 ${cursor.toFixed(1)}s`));
+    // 收尾：把可见区裁到 7 块（超出部分进滚动区）—— 必须在所有块 append 完之后量。
+    try { capScrollToVisible(); } catch (_) {}
+    // 超过 7 块时给一行提示，避免用户以为"后面的分镜丢了"
+    if (capped) {
+      clear(capped);
+      if (shots.length > MAX_VISIBLE_SHOTS) {
+        const pct = Math.round((MAX_VISIBLE_SHOTS / shots.length) * 100);
+        capped.appendChild(h("span", { style: { color: "#8fb6e8" } },
+          `共 ${shots.length} 块 · 显示前 ${MAX_VISIBLE_SHOTS} 块（${pct}%）`));
+        capped.appendChild(h("span", { style: { color: "#6f88ab" } }, "← 拖动下方滑块看后面的分镜 →"));
+      }
+    }
   };
   const renderEditor = () => {
     clear(editorHost);
@@ -2691,6 +2742,7 @@ export function createTimelinePanel(ctx) {
       upHint,
       h("button", { class: "btn", style: { padding: "6px 11px" }, onclick: () => ctx.switchTo("editor") }, "去剪辑")),
     scroll,
+    capped,
     h("div", { class: "col", style: { gap: 4, flex: "1 1 auto", minHeight: 0, overflowY: "auto" } }, editorHost),
     logBar);
 
