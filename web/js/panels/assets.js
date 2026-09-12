@@ -83,6 +83,16 @@ export function createAssetsPanel(ctx) {
   let curKind = "all";
   let files = [];
   // 勾选集合：同时服务于「批量删除」和「批量收藏」
+  // ★ 键必须是**文件夹内相对路径**（`audio/xxx.wav`、`video/yyy.mp4`、或裸名），
+  //   不能用裸文件名：音频/视频按约定放在 `<folder>/audio`、`<folder>/video` 子目录里
+  //   （见后端 _list_files 的 sub 字段），只发裸名会让后端在 folder 根下找不到文件 →
+  //   静默跳过 → 前端拿到 count=0、卡片却还在 → 用户看到"素材删不掉"。
+  //   顺带修掉重名歧义：不同子目录里的同名文件现在能分别勾选。
+  const relKey = (f) => {
+    const sub = String((f && f.sub) || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const nm = String((f && f.name) || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    return [sub, nm].filter(Boolean).join("/");
+  };
   const selSet = new Set();
 
   // 收藏（选中）状态 — 右上角「⭐ 收藏到收藏库」按钮（toolbar 内）+ 弹出浮层（角色/场景/素材/音频四分类）
@@ -121,7 +131,7 @@ export function createAssetsPanel(ctx) {
   function selectedItems() {
     const folder = folderIn.value.trim();
     if (selSet.size) {
-      return files.filter((f) => selSet.has(f.name)).map((f) => ({ name: f.name, rel: (folder ? folder + "/" : "") + f.name, kind: f.kind }));
+      return files.filter((f) => selSet.has(relKey(f))).map((f) => ({ name: f.name, rel: (folder ? folder + "/" : "") + relKey(f), kind: f.kind }));
     }
     return curPick ? [curPick] : [];
   }
@@ -260,9 +270,9 @@ export function createAssetsPanel(ctx) {
         }
         card.appendChild(h("div", { class: "mn", title: f.name }, f.name));
         const chk = h("input", { type: "checkbox", class: "ck", title: "勾选（可批量删除 / 批量收藏）", style: { position: "absolute", zIndex: 2 } });
-        chk.checked = selSet.has(f.name);
+        chk.checked = selSet.has(relKey(f));
         chk.onclick = (e) => { e.stopPropagation(); };
-        chk.onchange = (e) => { e.stopPropagation(); if (chk.checked) selSet.add(f.name); else selSet.delete(f.name); card.classList.toggle("chk", chk.checked); statusLbl.textContent = selSet.size ? `已选 ${selSet.size} 个 · ${files.length} 个文件` : `${files.length} 个文件`; if (favOpen) renderFavBar(); };
+        chk.onchange = (e) => { e.stopPropagation(); if (chk.checked) selSet.add(relKey(f)); else selSet.delete(relKey(f)); card.classList.toggle("chk", chk.checked); statusLbl.textContent = selSet.size ? `已选 ${selSet.size} 个 · ${files.length} 个文件` : `${files.length} 个文件`; if (favOpen) renderFavBar(); };
         card.appendChild(chk);
         const favB = h("button", { class: "abtn", title: "收藏此素材", onclick: (e) => {
           e.stopPropagation();
@@ -301,7 +311,14 @@ export function createAssetsPanel(ctx) {
             { divider: true },
             { icon: "🗑", label: "删除这个文件", danger: true, onClick: async () => {
               if (!confirm(`删除素材文件「${f.name}」？（不可恢复）`)) return;
-              try { const r = await ctx.api.deleteFiles(folderIn.value.trim(), [f.name]); ctx.toast(`已删除 ${r.count} 个`); selSet.delete(f.name); await assetRegistry.refresh(); refresh(); renderToolbar(); }
+              try {
+                const k = relKey(f);
+                const r = await ctx.api.deleteFiles(folderIn.value.trim(), [k]);
+                selSet.delete(k);
+                if (!r.count) ctx.toast(`没删掉（后端未找到 ${k}）—— 请刷新后重试`, true);
+                else ctx.toast(`已删除 ${r.count} 个`);
+                await assetRegistry.refresh(); refresh(); renderToolbar();
+              }
               catch (e) { ctx.toast("删除失败: " + e.message, true); }
             } },
           ]);
@@ -342,7 +359,8 @@ export function createAssetsPanel(ctx) {
       const newName = res.filename || (String(res.name || newStem) + ext);
       if (res.renamed) {
         // 勾选集合 / 当前选中项按名字换键，避免改名后选中态与收藏弹窗内容对不上
-        if (selSet.delete(oldName)) selSet.add(newName);
+        // （键是「文件夹内相对路径」，改名只换最后一段，子目录不变）
+        if (selSet.delete(relKey(f))) selSet.add(relKey({ sub: f.sub, name: newName }));
         if (curPick && curPick.name === oldName) curPick = { ...curPick, name: newName, rel: res.rel };
         // ① 参考绑定 rel 换新（<Picture N> / 公共前缀权威绑定不会失效）
         // ② localStorage 自定义顺序里的旧名换新（不会被甩到列表末尾）
@@ -476,20 +494,36 @@ export function createAssetsPanel(ctx) {
     const delB = h("button", { class: "btn", style: { padding: "6px 10px", borderColor: "#a33", fontSize: 12 }, onclick: async () => {
       if (!selSet.size) { ctx.toast("先勾选要删除的素材", true); return; }
       if (!confirm(`确定删除素材文件夹中的 ${selSet.size} 个文件？（不可恢复）`)) return;
-      try { const r = await ctx.api.deleteFiles(folderIn.value.trim(), [...selSet]); selSet.clear(); ctx.toast(`已删除 ${r.count} 个`); refresh(); renderToolbar(); }
+      try {
+        const want = [...selSet];
+        const r = await ctx.api.deleteFiles(folderIn.value.trim(), want);
+        selSet.clear();
+        // 后端会回传没找到的条目：不再"删了但卡片还在"却只提示成功
+        const miss = (r && r.missing) || [];
+        if (miss.length) ctx.toast(`已删除 ${r.count} 个；未找到 ${miss.length} 个（${miss.join("、")}）`, true);
+        else ctx.toast(`已删除 ${r.count} 个`);
+        refresh(); renderToolbar();
+      }
       catch (e) { ctx.toast("删除失败: " + e.message, true); }
     } }, `🗑 删除${selSet.size ? `(${selSet.size})` : ""}`);
     toolbar.appendChild(delB);
     const selAllB = h("button", { class: "btn", style: { padding: "6px 10px", fontSize: 12 }, onclick: () => {
-      const names = files.map((f) => f.name);
-      if (selSet.size && names.every((n) => selSet.has(n))) { selSet.clear(); } else { names.forEach((n) => selSet.add(n)); }
+      const keys = files.map((f) => relKey(f));
+      if (selSet.size && keys.every((k) => selSet.has(k))) { selSet.clear(); } else { keys.forEach((k) => selSet.add(k)); }
       refresh(); renderToolbar();
     } }, "☑ 全选/取消");
     toolbar.appendChild(selAllB);
     const clearB = h("button", { class: "btn", style: { padding: "6px 10px", borderColor: "#a33", fontSize: 12 }, onclick: async () => {
       if (!files.length) { ctx.toast("素材库已空", true); return; }
       if (!confirm(`清空素材文件夹「${folderIn.value.trim()}」的全部媒体文件（图片+视频+音频）？（不可恢复）`)) return;
-      try { const r = await ctx.api.clearFolder(folderIn.value.trim()); selSet.clear(); ctx.toast(`已清空 ${r.count} 个素材`); refresh(); renderToolbar(); }
+      try {
+        const r = await ctx.api.clearFolder(folderIn.value.trim());
+        selSet.clear();
+        // 「清空」按磁盘实际清掉的个数回报；< 列表数说明有文件不属于本文件夹（例如在子目录/被占用）
+        if (r.count < files.length) ctx.toast(`已清空 ${r.count} 个（列表有 ${files.length} 个，差额可能不在本文件夹内）`, true);
+        else ctx.toast(`已清空 ${r.count} 个素材`);
+        refresh(); renderToolbar();
+      }
       catch (e) { ctx.toast("清空失败: " + e.message, true); }
     } }, "🧹 清空");
     toolbar.appendChild(clearB);

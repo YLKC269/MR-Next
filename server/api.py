@@ -4160,7 +4160,16 @@ async def editor_options(req):
 
 
 async def studio_delete_files(req):
-    """删除素材文件夹内选中的文件（仅限目标文件夹内，防止越界）。"""
+    """删除素材文件夹内选中的文件（仅限目标文件夹内，防止越界）。
+
+    ⚠ 名字可以是**文件夹内相对路径**（`audio/xxx.wav` / `video/yyy.mp4` / 裸名）——
+    音频/视频按约定放在 `<folder>/audio`、`<folder>/video` 子目录里（见 `_list_files` 的
+    `sub` 字段与 `_media_subdir_list`）。以前这里只按 `folder/<裸名>` 找文件：
+      · 子目录里的音视频一律 `not os.path.isfile(...)` → **静默 continue** → removed=[]
+      · 前端拿到 count=0，toast「已删除 0 个」，而卡片还在原地
+    用户实报的"有两个删不掉的素材"（`测试/audio/云妙衣配音.wav`、`春桃配音.wav`）就是这条。
+    现在：支持子目录路径 + 裸名自动回退到已知媒体子目录 + 把没找到的条目回传给前端提示。
+    """
     body = await req.json()
     folder = (body.get("folder") or "").strip()
     names = [str(x).strip() for x in (body.get("names") or []) if str(x).strip()]
@@ -4169,31 +4178,59 @@ async def studio_delete_files(req):
     base = _input_base()
     root = _safe_join(base, folder) if folder else base
     removed = []
+    missing = []
     for name in names:
-        if "/" in name or "\\" in name or name in (".", ".."):
-            continue
-        full = os.path.join(root, name)
-        if not os.path.isfile(full):
+        rel = name.replace("\\", "/").strip().strip("/")
+        if not rel or rel in (".", ".."):
             continue
         try:
+            full = _safe_join(root, rel)          # 允许 "audio/xxx.wav"，自动防越界
+        except ValueError:
+            missing.append(rel)
+            continue
+        if not os.path.isfile(full):
+            # 兼容回退：旧前端只发裸名，而文件在 <folder>/audio|video 里 → 按同名找一遍。
+            # 顶层同名文件不存在时才走这里，所以不会误删（能命中顶层的话上面已经删了）。
+            hit = None
+            for sub in sorted(set(_media_subdir_list().values())):
+                try:
+                    cand = _safe_join(root, sub + "/" + rel)
+                except ValueError:
+                    continue
+                if os.path.isfile(cand):
+                    hit = (cand, sub + "/" + rel)
+                    break
+            if hit is None:
+                missing.append(rel)
+                continue
+            full, rel = hit
+        try:
             os.remove(full)
-            removed.append(name)
+            removed.append(rel)
         except Exception as exc:  # noqa: BLE001
-            return _json({"error": f"删除 {name} 失败: {exc}"}, status=500)
+            return _json({"error": f"删除 {rel} 失败: {exc}"}, status=500)
     # 清掉被删文件的缩略图缓存（rel = folder/name）
     _purge_thumb_cache([(folder + "/" + n) if folder else n for n in removed])
-    return _json({"removed": removed, "count": len(removed)})
+    return _json({"removed": removed, "count": len(removed), "missing": missing})
 
 
 async def studio_clear_folder(req):
-    """POST /mrnext/studio/clear_folder —— 清空素材文件夹所有媒体文件（图片+视频+音频，含 folder/video 子目录）。"""
+    """POST /mrnext/studio/clear_folder —— 清空素材文件夹所有媒体文件（图片+视频+音频，含子目录）。
+
+    ⚠ 子目录必须**遍历 `_media_subdir_list()`**，不能写死 `video`：
+    音频按约定在 `<folder>/audio`，写死 video 会让「🧹 清空」留下全部音频
+    （用户实报"有两个删不掉的素材"的另一半原因）。
+    """
     body = await req.json()
     folder = (body.get("folder") or "").strip()
     base = _input_base()
     targets = []
     if folder:
         targets.append(_safe_join(base, folder))
-        targets.append(_safe_join(base, folder + "/video"))
+        for sub in sorted(set(_media_subdir_list().values())):
+            targets.append(_safe_join(base, folder + "/" + sub))
+    else:
+        targets.append(base)
     removed = 0
     for d in targets:
         if not os.path.isdir(d):
