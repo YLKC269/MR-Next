@@ -3978,9 +3978,14 @@ async def editor_options(req):
     if not unets: unets = list1("unet")
     clips  = [n for n in list1("text_encoders") if "minimax" in n.lower() or "qwen" in n.lower()]
     if not clips: clips = list1("clip")
-    vvaes  = [n for n in list1("vae") if any(k in n.lower() for k in ("video", "krea2", "minimax"))]
-    avaes  = [n for n in list1("vae") if "audio" in n.lower() or "minimax" in n.lower()]
-    if not avaes: avaes = [n for n in list1("vae") if "audio" in n.lower()]
+    # VAE 列表：音频/视频必须**互斥**。以前 avaes 的条件里带了 "minimax"，
+    # 而 minimax_h3_video_vae_* 也含 "minimax" → 视频 VAE 也出现在「音频 VAE」下拉里，
+    # 用户一旦选错（拿视频 VAE 当音频用）就是采样期维度不匹配。
+    _all_vaes = list1("vae")
+    vvaes = [n for n in _all_vaes if "audio" not in n.lower() and any(k in n.lower() for k in ("video", "krea2"))]
+    avaes = [n for n in _all_vaes if "audio" in n.lower()]
+    if not vvaes: vvaes = [n for n in _all_vaes if "audio" not in n.lower()]
+    if not avaes: avaes = _all_vaes
     base_loras   = list1("loras")  # 默认 LoRA（ComfyUI 内置 loras 目录）
     custom_loras = list_loras(extra_path=extra) if (enabled and extra) else []
     # 合并去重（默认在前、自定义在后）

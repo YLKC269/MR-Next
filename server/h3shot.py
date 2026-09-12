@@ -896,6 +896,47 @@ def _queue_extra_data(server):
     return extra
 
 
+def _graph_model_line(graph) -> str:
+    """摘出构图里实际用到的模型文件名。
+
+    维度类报错（Input and weight inner dimensions must match）本身**完全不提示**是哪个
+    LoRA / 基座 / VAE 引起的 —— 把这条上下文带上，用户才能自己修。
+    """
+    try:
+        parts = []
+        for _nid, n in (graph or {}).items():
+            ct = str((n or {}).get("class_type") or "")
+            ins = (n or {}).get("inputs") or {}
+            if ct == "UNETLoader":
+                parts.append("UNet=" + str(ins.get("unet_name")))
+            elif ct == "CLIPLoader":
+                parts.append("CLIP=" + str(ins.get("clip_name")))
+            elif ct == "VAELoader":
+                parts.append("VAE=" + str(ins.get("vae_name")))
+            elif ct in ("LoraLoader", "LoraLoaderModelOnly"):
+                parts.append("LoRA=" + str(ins.get("lora_name")))
+        return " | ".join(parts)
+    except Exception:  # noqa: BLE001 - 诊断信息绝不能反过来打断报错
+        return ""
+
+
+_DIM_ERR_MARKERS = ("inner dimensions must match", "size mismatch", "shapes cannot be multiplied",
+                    "mat1 and mat2", "cannot be multiplied")
+
+
+def _dim_error_hint(detail: str, graph) -> str:
+    """维度不匹配时补一条可执行的排查提示（这是「拿错 LoRA」最常见的症状）。"""
+    low = str(detail or "").lower()
+    if not any(m in low for m in _DIM_ERR_MARKERS):
+        return ""
+    line = _graph_model_line(graph)
+    return (" ｜ 疑似「LoRA / 基座 / VAE 不配套」导致维度不匹配。本次构图：" + (line or "(未取到)")
+            + "。请核对：① LoRA 与基座同精度族（pruned_int8/convrot 的基座要配 pruned 版 LoRA，"
+              "bf16 基座配 bf16 版 LoRA）；② 任务族一致（FL2VA 首尾帧权重别配 Ref2VA 专用 LoRA，"
+              "hybrid/curveproj 变体只配 hybrid 基座）；③ 音频 VAE 用 minimax_h3_audio_vae_fp32；"
+              "④ 排不掉时先把「蒸馏 LoRA」设为 (无) 再跑一次验证。")
+
+
 async def run_shot(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0,
                    first_frame=None, last_frame=None, refs=None, audios=None,
                    ref_by_num=None, audio_by_num=None, videos=None, video_by_num=None,
@@ -954,7 +995,7 @@ async def run_shot(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.
             if status.get("status_str") == "error":
                 msgs = [m for m in (status.get("messages") or []) if m and m[0] == "execution_error"]
                 detail = str(msgs[0][1].get("exception_message") or msgs[0][1])[:300] if msgs else "unknown"
-                raise RuntimeError("H3 采样出错: " + detail)
+                raise RuntimeError("H3 采样出错: " + detail + _dim_error_hint(detail, graph))
     else:
         raise TimeoutError("H3 采样超时（>%ds）" % timeout)
 
@@ -1131,5 +1172,6 @@ def run_shot_sync(mode, prompt, out_dir, *, seed=0, seconds=5.0, frame_rate=24.0
     if t.is_alive():
         raise TimeoutError("H3 同步采样超时（>%ds）" % timeout)
     if not result.get("success"):
-        raise RuntimeError("H3 采样出错: " + (result.get("error") or "unknown"))
+        _err = result.get("error") or "unknown"
+        raise RuntimeError("H3 采样出错: " + _err + _dim_error_hint(_err, graph))
     return _collect_video_after_sync(mode, seed, out_dir, before_files)

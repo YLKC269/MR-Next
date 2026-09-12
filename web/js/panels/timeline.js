@@ -38,6 +38,39 @@ const MODE_HINT = {
 const PX = 16; // 每秒像素
 const IMG_CAP = 9;
 
+// ---------- LoRA ↔ 基座 家族判定（防「拿错 LoRA 直接跑崩」）----------
+// 社区硬约束：LoRA 必须与基座**同架构同精度族**。混用（bf16 LoRA × pruned-int8 基座、
+// Ref2VA LoRA × FL2VA 基座、Krea2/LTX 的 LoRA × H3…）在采样期直接抛
+// `Input and weight inner dimensions must match`，且报错信息完全不提示原因。
+// 这里按文件名特征做前置判定，在 UI 上直接标红，并在出片日志里带一句可执行的提示。
+const NON_H3_LORA_RE = /(krea2|ltx|clearreality|seedvr|vosr|esrgan|realesrgan|swinir)/i;
+const H3_LORA_RE = /(h3|minimax|fl2v|ref2v|mmh3|wushu|mystic|t8-)/i;
+const TURBO_LORA_RE = /(turbo|acc[-_ ]?\d*step|\d+\s*step|nfe|\d+\s*步)/i;
+const isH3Lora = (n) => !!n && !NON_H3_LORA_RE.test(String(n)) && H3_LORA_RE.test(String(n));
+const loraTags = (n) => {
+  const s = String(n || "").toLowerCase();
+  return { pruned: /pruned/.test(s), bf16: /bf16|fp16|fp8/.test(s),
+           fl2v: /fl2v|fl2va/.test(s), ref2v: /ref2v|ref2va/.test(s),
+           hybrid: /hybrid|curveproj/.test(s), other: NON_H3_LORA_RE.test(s) };
+};
+const unetTags = (n) => {
+  const s = String(n || "").toLowerCase();
+  return { prunedInt8: /pruned|int8|convrot|w4a8/.test(s), bf16: /bf16|fp8/.test(s),
+           fl2v: /fl2v|fl2va/.test(s), ref2v: /ref2v|ref2va/.test(s), hybrid: /hybrid/.test(s) };
+};
+// 返回冲突说明（空串 = 没发现问题）。这是出片失败最常见的可诊断原因。
+const loraUnetConflict = (lora, unet) => {
+  if (!lora || lora === "(无)" || !unet) return "";
+  const L = loraTags(lora), U = unetTags(unet);
+  if (L.other) return `「${lora}」不是 H3/MiniMax 的 LoRA（Krea2 / LTX / 放大模型等），喂给 H3 基座必然维度不匹配`;
+  if (L.hybrid && !U.hybrid) return `「${lora}」是 hybrid（fl2va+ref2va 混合）变体专用，当前基座 ${unet} 不是 hybrid 版`;
+  if (L.bf16 && U.prunedInt8) return `「${lora}」是 bf16/fp8 基座专用，当前基座是 pruned/int8 —— 社区明确不兼容，必报 "Input and weight inner dimensions must match"`;
+  if (L.pruned && U.bf16) return `「${lora}」是 pruned 剪枝基座专用，当前基座是 bf16/fp8 精度`;
+  if (L.ref2v && !L.fl2v && U.fl2v && !U.ref2v) return `「${lora}」是 Ref2VA（参考生视频）专用，当前基座是 FL2VA 首尾帧权重`;
+  if (L.fl2v && !L.ref2v && U.ref2v && !U.fl2v) return `「${lora}」是 FL2VA 首尾帧专用，当前基座是 Ref2VA 权重`;
+  return "";
+};
+
 const DEFAULT_PARAMS = () => ({
   mode: "t2v",
   model: { unet: "", clip: "", vvae: "", avae: "", lora: "(无)", loraS: 1, autoUnet: true },
@@ -534,6 +567,7 @@ export function createTimelinePanel(ctx) {
         P.model.autoUnet = false;      // 手动选过就不再自动覆盖
         if (autoUnetCk.checked) autoUnetCk.checked = false;
         paintUnetWarn();
+        paintLoraWarn();               // 换基座 → 立刻重判 LoRA 是否还配套
       };
       paintUnetWarn();
       const clipE = mkS(opts.clips, P.model.clip);
@@ -559,7 +593,16 @@ export function createTimelinePanel(ctx) {
         }
       };
       avaeE.onchange = () => { P.model.avae = avaeE.value; syncAvaeNote(); };
-      const loraE = sel(["(无)"].concat(opts.loras || []), P.model.lora); loraE.onchange = () => { P.model.lora = loraE.value; };
+      // 模型页 LoRA：只列 H3/MiniMax 家族（Krea2 / LTX / 放大模型混进来必崩：维度不匹配）
+      const loraE = sel(["(无)"].concat((opts.loras || []).filter((n) => isH3Lora(n))), P.model.lora);
+      const loraWarn = h("div", { class: "muted", style: { gridColumn: "1 / -1", fontSize: "11px", lineHeight: "1.55" } });
+      const paintLoraWarn = () => {
+        const msg = loraUnetConflict(loraE.value, P.model.unet);
+        loraWarn.textContent = msg ? "⚠ " + msg : "";
+        loraWarn.style.color = msg ? "#ffb4b4" : "";
+      };
+      loraE.onchange = () => { P.model.lora = loraE.value; paintLoraWarn(); };
+      paintLoraWarn();
       const loraSE = num(P.model.loraS, "1", 52, 0.1); loraSE.oninput = () => { P.model.loraS = Number(loraSE.value) || 1; };
       // CLIP 选型提示：H3 是 cfg=1.0（无负引导）模型，画面全靠文本 embedding 指路。
       // nvfp4/fp4 这类 4bit 量化 CLIP 省内存，但语义会打折，症状就是「画面不按提示词走」，
@@ -578,7 +621,7 @@ export function createTimelinePanel(ctx) {
           h("span", { class: "muted", style: { fontSize: 11 } }, "跟随模式自动选权重（推荐：r2v → ref2va，首尾帧 → fl2va）")),
         field("UNet 模型", unetE, "model"), field("CLIP 文本编码", clipE, "clip"),
         field("视频 VAE", vvaeE, "video_vae"), field("音频 VAE", avaeE, "audio_vae"),
-        field("LoRA", loraE, "lora_name"), field("LoRA 强度", loraSE, "lora_strength"), clipNote, avaeNote);
+        field("LoRA", loraE, "lora_name"), field("LoRA 强度", loraSE, "lora_strength"), clipNote, avaeNote, loraWarn);
       syncClipNote();
       syncAvaeNote();
     } else if (key === "sample") {
@@ -919,8 +962,19 @@ export function createTimelinePanel(ctx) {
       const bestBtn = h("button", { class: "btn btn-primary", style: { padding: "4px 10px", fontSize: 11.5 },
         title: "一键回到最佳画质：步数 20（社区成片基线）+ 出片后自动二采 + 关掉内置注意力加速 / 外接 SageAttention / 蒸馏 LoRA",
         onclick: resetToBestQuality }, "🧼 一键最佳画质");
-      const loraPool = ["(无)"].concat((opts.loras || []).filter((n) => /(H3|h3|minimax).*(step|turbo)|(step|turbo).*(h3|H3|minimax)|Acc-8Step|Acc-4Step|8step|4step/i.test(n)));
-      const accLoraE = sel(loraPool, P.speed.lora); accLoraE.onchange = () => { P.speed.lora = accLoraE.value; paintAccelStatus(); };
+      // 蒸馏 LoRA 池：**必须同时**属于 H3 家族 + 带 turbo/步数标记。
+      // ⚠ 旧正则里的裸 `4step|8step` 会把 `krea2_turbo_4step_*`（Krea2 图像模型的 LoRA）
+      //    也收进来 —— 选它跑 H3 直接报 "Input and weight inner dimensions must match"。
+      const loraPool = ["(无)"].concat((opts.loras || []).filter((n) => isH3Lora(n) && TURBO_LORA_RE.test(n)));
+      const accLoraE = sel(loraPool, P.speed.lora);
+      const accLoraWarn = h("div", { class: "muted", style: { gridColumn: "1 / -1", fontSize: "11px", lineHeight: "1.55" } });
+      const paintAccLoraWarn = () => {
+        const msg = loraUnetConflict(accLoraE.value, P.model.unet);
+        accLoraWarn.textContent = msg ? "⚠ " + msg : "";
+        accLoraWarn.style.color = msg ? "#ffb4b4" : "";
+      };
+      accLoraE.onchange = () => { P.speed.lora = accLoraE.value; paintAccelStatus(); paintAccLoraWarn(); };
+      paintAccLoraWarn();
       const accLoraSE = num(P.speed.loraS, "1", 46, 0.1); accLoraSE.oninput = () => { P.speed.loraS = Number(accLoraSE.value) || 1; paintAccelStatus(); };
       // 官方 Block Sparse Attention 加速（sageattn）
       const SAGE_MODES = [
@@ -1084,6 +1138,7 @@ export function createTimelinePanel(ctx) {
         field("BlockSparse 加速", sageE, "PathchSageAttentionKJ"),
         field("蒸馏 LoRA", accLoraE, "speed_lora"),
         field("蒸馏 LoRA 强度", accLoraSE, "speed_lora_strength"),
+        accLoraWarn,
         freeCk);
     } else if (key === "common") {
       // 公共提示词（对齐官方导演台 common prompt）：
@@ -1911,6 +1966,15 @@ export function createTimelinePanel(ctx) {
         _warns.push("当前 r2v 用的是「" + P.model.unet + "」—— 不是 ref2va（参考）权重。"
           + "fl2va 是首尾帧权重，会把参考图 / 参考音色当噪声忽略，标了也不生效 → "
           + "去「🧠 模型」页一键切到 " + (refUnetName() || "ref2va 权重") + " 再重跑本镜");
+      }
+    } catch (_) {}
+    // LoRA × 基座 家族冲突回执：这是采样期「Input and weight inner dimensions must match」
+    // 的头号原因（报错信息本身完全不提示是 LoRA 的问题）。出片前就告知，省一轮白等。
+    try {
+      const _slots = [["模型页 LoRA", P.model.lora], ["蒸馏 LoRA", P.speed.lora]];
+      for (const [slot, name] of _slots) {
+        const msg = loraUnetConflict(name, P.model.unet);
+        if (msg) _warns.push(`${slot}：${msg} —— 换成配套 LoRA，或先设为「(无)」再跑本镜`);
       }
     } catch (_) {}
     println(`▶ 第${sh.index}镜（${modeLabel(P.mode)} · ${sec}s · ${isFramesMode
