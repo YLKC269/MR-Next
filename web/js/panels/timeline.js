@@ -33,7 +33,7 @@ const MODE_HINT = {
   i2v: "首帧 = 本镜 图[0]/视[0]",
   fl2v: "首=本镜图[0] 尾=本镜图[1]",
   fl2v_tail: "尾帧 = 本镜图[0]",
-  r2v: "参考图 ≤9（音/视频槽引擎接入中）",
+  r2v: "参考图 ≤9 · 音/视频参考 ≤3 · 调度器优选 beta/normal（社区实测比 simple 更稳）",
 };
 const PX = 16; // 每秒像素
 const IMG_CAP = 9;
@@ -52,7 +52,10 @@ const DEFAULT_PARAMS = () => ({
     // 全局时长开关：true = 所有分镜统一用 sec（忽略各镜单独设置）；false = 各镜用自己的 sec（未设则跟随 sec）
     global_sec: false,
     // 高级采样（官方 bd_grp_advanced）
-    steps: 25, sampler: "res_multistep", scheduler: "simple", shift_video: 12, shift_audio: 3,
+    // 社区成片基线：18–22 步（20 = 生产档；>24 收益极低、时间成倍）；res_multistep + simple + cfg=1（引导蒸馏，拉高 CFG 反而闪烁）
+    steps: 20, sampler: "res_multistep", scheduler: "simple", shift_video: 12, shift_audio: 3,
+    // T8 双时钟分离采样（社区低步数提速方案）：音频在自己的时钟独立推进 —— 视频 6 步提速时音频仍可跑 10 步防失真
+    dual_clock: false, steps_audio: 0,
     // 性能（官方 bd_grp_perf）
     clear_vram: true, export_src: false,   // 官方 clear_vram_between_segments 默认 True（对齐官方）
     // 导出模式：all=全部合成一条视频，segments=每镜独立导出（官方导演台同款）
@@ -445,10 +448,11 @@ export function createTimelinePanel(ctx) {
     // 用户实报「视频好糊，没有之前清晰了，是不是加速开多了」。
     // 吃画质的开关散在 4 处（内置注意力加速 / 外接 SageAttention / 蒸馏 LoRA / 步数），
     // 而且都会持久化到 localStorage —— 没有一键回退就只能靠用户一个个试。
+    // 20 步 = 社区成片基线（>24 收益极低）；这是「绝对画质」档，Sage 也不开（求稳）。
     const resetToBestQuality = () => {
       const changed = [];
       const st0 = Number(P.output.steps) || 0;
-      if (st0 !== 25) { changed.push(`步数 ${st0}→25`); P.output.steps = 25; }
+      if (st0 !== 20) { changed.push(`步数 ${st0}→20`); P.output.steps = 20; }
       if (String(P.output.sampler) !== "res_multistep") { changed.push("采样器 →res_multistep"); P.output.sampler = "res_multistep"; }
       if (String(P.output.scheduler) !== "simple") { changed.push("调度器 →simple"); P.output.scheduler = "simple"; }
       if (Number(P.output.cfg) !== 1) { changed.push(`cfg ${P.output.cfg}→1`); P.output.cfg = 1; }
@@ -531,7 +535,27 @@ export function createTimelinePanel(ctx) {
       paintUnetWarn();
       const clipE = mkS(opts.clips, P.model.clip);
       const vvaeE = mkS(opts.videoVaes, P.model.vvae); vvaeE.onchange = () => { P.model.vvae = vvaeE.value; };
-      const avaeE = mkS(opts.audioVaes, P.model.avae); avaeE.onchange = () => { P.model.avae = avaeE.value; };
+      const avaeE = mkS(opts.audioVaes, P.model.avae);
+      // 音频 VAE 精度检查（社区高频翻车点）：fp16/bf16 的音频 VAE 会爆音、音画时序错位，必须 fp32。
+      // 视频VAE 用 fp16 没问题 —— 只有音频那颗对精度敏感。
+      const avaeNote = h("div", { class: "muted", style: { gridColumn: "1 / -1", fontSize: "11px", lineHeight: "1.55" } });
+      const syncAvaeNote = () => {
+        const cur = String(avaeE.value || "");
+        if (!cur) {
+          avaeNote.textContent = "音频 VAE 未指定：走示例工作流默认值；建议选 fp32 版（社区实测 fp16 直接爆音、音画错位）";
+          avaeNote.style.color = "#7d9dba";
+        } else if (/fp16|bf16/i.test(cur)) {
+          avaeNote.textContent = `⚠ 当前音频 VAE「${cur}」是 fp16/bf16 —— 社区实测会爆音、音画时序错位，请换 fp32 版（如 minimax_h3_audio_vae_fp32.safetensors）`;
+          avaeNote.style.color = "#ffb4b4";
+        } else if (/fp32/i.test(cur)) {
+          avaeNote.textContent = `✓ ${cur}（fp32 音频 VAE，音轨安全）`;
+          avaeNote.style.color = "#8ff0c0";
+        } else {
+          avaeNote.textContent = `音频 VAE「${cur}」未标精度 —— 若出片爆音，优先换 fp32 版（minimax_h3_audio_vae_fp32.safetensors）`;
+          avaeNote.style.color = "#7d9dba";
+        }
+      };
+      avaeE.onchange = () => { P.model.avae = avaeE.value; syncAvaeNote(); };
       const loraE = sel(["(无)"].concat(opts.loras || []), P.model.lora); loraE.onchange = () => { P.model.lora = loraE.value; };
       const loraSE = num(P.model.loraS, "1", 52, 0.1); loraSE.oninput = () => { P.model.loraS = Number(loraSE.value) || 1; };
       // CLIP 选型提示：H3 是 cfg=1.0（无负引导）模型，画面全靠文本 embedding 指路。
@@ -551,8 +575,9 @@ export function createTimelinePanel(ctx) {
           h("span", { class: "muted", style: { fontSize: 11 } }, "跟随模式自动选权重（推荐：r2v → ref2va，首尾帧 → fl2va）")),
         field("UNet 模型", unetE, "model"), field("CLIP 文本编码", clipE, "clip"),
         field("视频 VAE", vvaeE, "video_vae"), field("音频 VAE", avaeE, "audio_vae"),
-        field("LoRA", loraE, "lora_name"), field("LoRA 强度", loraSE, "lora_strength"), clipNote);
+        field("LoRA", loraE, "lora_name"), field("LoRA 强度", loraSE, "lora_strength"), clipNote, avaeNote);
       syncClipNote();
+      syncAvaeNote();
     } else if (key === "sample") {
       // 采样设置组（官方 bd_grp_sample + bd_grp_advanced + bd_grp_perf 合并）
       const aspects = opts?.aspects || [{ v: "768:1344", w: 768, h: 1344 }];
@@ -577,15 +602,35 @@ export function createTimelinePanel(ctx) {
       // 官方 ref_image_size（MiniMaxH3ReferenceToVideo 的组合框）：match / max
       const refImgSizeE = sel(["match", "max"], P.output.ref_image_size || "match");
       refImgSizeE.onchange = () => { P.output.ref_image_size = refImgSizeE.value; };
-      // 官方：steps INT 1–200（默认 25）→ 用自由输入（以前是固定下拉，值不全）
-      const stepsE = num(P.output.steps, "25", 64, 1);
+      // 官方：steps INT 1–200（社区基线 20）→ 用自由输入（以前是固定下拉，值不全）
+      const stepsE = num(P.output.steps, "20", 64, 1);
       stepsE.min = 1; stepsE.max = 200;
-      stepsE.oninput = () => { P.output.steps = Math.max(1, Math.min(200, Number(stepsE.value) || 25)); if (stepsWarnPainter) stepsWarnPainter(); };
+      stepsE.oninput = () => { P.output.steps = Math.max(1, Math.min(200, Number(stepsE.value) || 20)); if (stepsWarnPainter) stepsWarnPainter(); };
       const samplerE = sel((opts?.samplers || ["res_multistep"]), P.output.sampler || "res_multistep"); samplerE.onchange = () => { P.output.sampler = samplerE.value; };
       const schedE = sel((opts?.schedulers || ["simple"]), P.output.scheduler || "simple"); schedE.onchange = () => { P.output.scheduler = schedE.value; };
+      // T8 双时钟分离采样（社区方案：视频低步数提速时，音频在自己的时钟独立推进防失真）。
+      // 节点端 dual_clock/steps_audio 已支持；开启后采样走双时钟 euler，切分失败自动回退官方单时钟。
+      const dcCk = h("input", { type: "checkbox", checked: P.output.dual_clock ? "checked" : null, style: { accentColor: "#ffd166" } });
+      const dcStepsE = num(P.output.steps_audio || 10, "10", 56, 1);
+      dcStepsE.min = 4; dcStepsE.max = 32;
+      dcStepsE.disabled = !P.output.dual_clock;
+      dcCk.onchange = () => {
+        P.output.dual_clock = dcCk.checked;
+        dcStepsE.disabled = !dcCk.checked;
+        if (dcCk.checked && !Number(P.output.steps_audio)) P.output.steps_audio = 10;
+        if (stepsWarnPainter) stepsWarnPainter();
+      };
+      dcStepsE.oninput = () => {
+        P.output.steps_audio = Math.max(4, Math.min(32, Number(dcStepsE.value) || 10));
+        if (stepsWarnPainter) stepsWarnPainter();
+      };
+      const dcWrap = h("div", { class: "row", style: { gap: 6, alignItems: "center" } }, dcCk,
+        h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 dual_clock + steps_audio：音频独立时钟独立步数。社区低步数提速方案 —— 视频压到 4/6 步时音频仍可跑 8–12 步，避免爆音/杂音" }, "音频独立步数"),
+        dcStepsE);
       // 采样方案按钮组（采样器+调度器组合预设，一键切换）
       const SAMPLE_PRESETS = [
         { label: "官方标准", sampler: "res_multistep", scheduler: "simple", tip: "官方推荐，质量稳定" },
+        { label: "R2V 优选", sampler: "res_multistep", scheduler: "beta", tip: "参考生视频社区实测：beta 调度比 simple 人物一致性更稳" },
         { label: "快速", sampler: "euler", scheduler: "simple", tip: "速度快" },
         { label: "均衡", sampler: "euler", scheduler: "normal", tip: "速度质量均衡" },
         { label: "高质量", sampler: "res_multistep", scheduler: "normal", tip: "画质优先（较慢）" },
@@ -605,15 +650,17 @@ export function createTimelinePanel(ctx) {
         });
       };
       renderPreset();
-      // 画质档位（社区实测基线：官方 res_multistep + simple + cfg=1 + shift 12/3；
-      // 低步数必须配蒸馏 LoRA，且步数 <8 时音轨失真由「声音」页护栏兜底）
+      // 画质档位（对齐社区"预览归预览、成片归成片"两套工作流）。
+      // 公共基线：res_multistep + simple + cfg=1（引导蒸馏）+ shift 12/3（训练值）。
+      // 预览 = SageAttention + 蒸馏 LoRA 低步数 + 双时钟（音频独立步数防失真）；
+      // 成片 = SageAttention + 16–20 步原生采样（社区实测 >24 步收益极低）+ 二采。
       const QUALITY_PRESETS = [
-        { key: "draft", label: "草稿 6 步（快·最糊）", steps: 6, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 0.75, upscale: "off",
-          tip: "6 步 + 蒸馏 LoRA：出图最快。低步数音轨易失真（ComfyUI 主仓 bug，需 nightly），已由「声音」页音频护栏自动兜底。Turbo LoRA 强度建议在 0.5–1.0 间扫，别盲套 alpha=8" },
-        { key: "standard", label: "标准 12 步", steps: 12, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 1, upscale: "off",
-          tip: "官方推荐：12–20 步 + res_multistep + simple，cfg=1，shift 保持训练值 12/3。画质与音质均衡" },
-        { key: "final", label: "成品 20 步+二采", steps: 20, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 0, upscale: "auto",
-          tip: "20 步官方标准 + 出片后自动二采高清放大。最慢，但画质/音质最好" },
+        { key: "draft", label: "草稿 6 步·Turbo+双时钟（预览）", steps: 6, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 1.0, upscale: "off", dual: 10,
+          tip: "社区预览方案：SageAttention + 蒸馏 LoRA 6 步 + T8 双时钟（音频独立 10 步，防低步数爆音）。最快，只用于验证构图/动作/台词。若人声仍有电流噪，可把「音频 shift」试 6（Turbo 社区值）" },
+        { key: "standard", label: "标准 16 步（均衡）", steps: 16, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "off", dual: 0,
+          tip: "社区基线：res_multistep + simple + cfg=1。实测低于 ~15 步画质明显下降，16 步是画质/速度均衡点" },
+        { key: "final", label: "成品 20 步+二采（最佳）", steps: 20, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "auto", dual: 0,
+          tip: "社区成片方案：20 步生产基线（>24 收益极低）+ 出片后自动二采高清放大。最慢，但画质/音质最好" },
       ];
       const qualWrap = h("div", { class: "row", style: { gap: 4, flexWrap: "wrap" } });
       const renderQual = () => {
@@ -629,21 +676,37 @@ export function createTimelinePanel(ctx) {
               P.output.steps = q.steps; P.output.sampler = q.sampler; P.output.scheduler = q.scheduler;
               P.output.cfg = q.cfg; P.output.shift_video = q.sv; P.output.shift_audio = q.sa;
               P.output.upscale_mode = q.upscale || "off";
-              if (q.turboS > 0) P.speed.loraS = q.turboS;
+              // 双时钟分离采样：预览档开启并给音频独立步数；其余档关（成片走官方单时钟）
+              P.output.dual_clock = !!q.dual; P.output.steps_audio = q.dual || 0;
+              dcCk.checked = !!q.dual; dcStepsE.disabled = !q.dual;
+              if (q.dual) dcStepsE.value = String(q.dual);
+              const notes = [];
+              // 社区加速哲学：SageAttention 近乎无损、成片可开；档位一键带上（后端不可用会自动降级）
+              const _sageBad = P.speed.accelInfo && P.speed.accelInfo.sage && P.speed.accelInfo.sage.available === false;
+              if (!_sageBad && P.speed.accel !== "sage") { P.speed.accel = "sage"; notes.push("SageAttention 已开（社区首选 · 近乎无损 · 2–4×）"); }
+              if (_sageBad && P.speed.accel === "sage") { P.speed.accel = "off"; notes.push("本机 SageAttention 不可用 → 保持关闭"); }
+              // 蒸馏 LoRA 只属于预览档（社区结论：损伤音质，不进成片）—— 切标准/成品自动关掉
+              if (q.dual) {
+                P.speed.loraS = q.turboS || 1;
+                if (!P.speed.lora || P.speed.lora === "(无)") {
+                  ctx.toast("草稿档请到「⚡加速」页选一个蒸馏 LoRA（4/8 步），否则低步数画质会崩", true);
+                }
+              } else if (P.speed.lora && P.speed.lora !== "(无)") {
+                P.speed.lora = "(无)";
+                notes.push("蒸馏 LoRA 已关（社区实测损伤音质，不进成片）");
+              }
               stepsE.value = String(q.steps); samplerE.value = q.sampler; schedE.value = q.scheduler;
               cfgE.value = String(q.cfg); sVE.value = String(q.sv); sAE.value = String(q.sa);
               renderQual(); renderPreset();
               if (stepsWarnPainter) stepsWarnPainter();
-              if (q.key === "draft" && (!P.speed.lora || P.speed.lora === "(无)")) {
-                ctx.toast("草稿档请到「⚡加速」页选一个蒸馏 LoRA（4/8 步），否则低步数画质会崩", true);
-              }
+              if (notes.length) ctx.toast(notes.join("；"));
             },
           }, q.label));
         });
         // 一键最佳画质也放这里：用户觉得「糊」时第一反应是来画质档位，不该跑到「⚡加速」页才对
         qualWrap.appendChild(h("button", {
           class: "btn", style: { padding: "4px 9px", fontSize: 11 },
-          title: "步数 25（节点原生默认）+ 出片后自动二采 + 关掉全部加速（内置注意力加速 / 外接 SageAttention / 蒸馏 LoRA）。画质最好，最慢",
+          title: "步数 20（社区成片基线）+ 出片后自动二采 + 关掉内置注意力加速 / 外接 SageAttention / 蒸馏 LoRA。绝对画质，最慢",
           onclick: resetToBestQuality,
         }, "🧼 最佳画质"));
       };
@@ -677,7 +740,8 @@ export function createTimelinePanel(ctx) {
         h("span", { style: { fontSize: 11.5, color: "#bcd3ea" }, title: official || "" }, label));
       row.append(
         field("步数", stepsE, "steps (1-200)"),
-        field("画质档位", qualWrap, "低步数画质/音质预设：草稿 6 步 · 标准 12 步 · 成品 20 步+二采"),
+        field("画质档位", qualWrap, "社区两套方案：预览（6 步+Turbo+双时钟）/ 标准 16 步 / 成品 20 步+二采"),
+        field("双时钟·音频步数", dcWrap, "dual_clock / steps_audio：视频低步数提速时音频独立推进，防爆音"),
         field("采样方案", presetWrap, "采样器+调度器组合预设（点击切换）"),
         field("采样器", samplerE, "sampler"),
         field("调度器", schedE, "scheduler"),
@@ -721,10 +785,24 @@ export function createTimelinePanel(ctx) {
       const warn = h("div", { style: { fontSize: 11, color: "#ffb35c", lineHeight: 1.5 } });
       const paintWarn = () => {
         const st = Number(P.output.steps) || 0;
-        if (st > 0 && st < Number(A.min_steps || 8)) {
+        const minS = Number(A.min_steps || 8);
+        // 双时钟分离采样：音轨在自己的时钟推进 → 只看音频独立步数，视频低步数不再拖累音质
+        if (P.output.dual_clock) {
+          const sa = Number(P.output.steps_audio) || 0;
+          if (sa >= minS) {
+            warn.style.color = "#8ff0c0";
+            warn.textContent = `✓ 双时钟分离采样：视频 ${st} 步 · 音频 ${sa} 步（低步数提速不伤音轨）`;
+          } else {
+            warn.style.color = "#ffb35c";
+            warn.textContent = `⚠ 双时钟已开，但音频独立步数 ${sa} < 安全线 ${minS}：音轨仍可能失真，建议音频步数 ≥ ${minS}`;
+          }
+          return;
+        }
+        warn.style.color = "#ffb35c";
+        if (st > 0 && st < minS) {
           warn.textContent = A.guard === false
-            ? `⚠ 当前 ${st} 步 < 安全线 ${A.min_steps} 步：低步数下音轨极易失真（画质正常、声音变噪音）。建议升 ComfyUI nightly，或关掉护栏时手动提到 ${A.min_steps} 步以上。`
-            : `⏫ 当前 ${st} 步 < 安全线 ${A.min_steps} 步：出片时会自动抬到 ${A.min_steps} 步（护栏已开启）。`;
+            ? `⚠ 当前 ${st} 步 < 安全线 ${minS} 步：低步数下音轨极易失真（画质正常、声音变噪音）。建议升 ComfyUI nightly，或关掉护栏时手动提到 ${minS} 步以上，或开启「采样设置 → 双时钟」让音频独立跑步数。`
+            : `⏫ 当前 ${st} 步 < 安全线 ${minS} 步：出片时会自动抬到 ${minS} 步（护栏已开启；想保住低步数提速请开启「采样设置 → 双时钟」并设音频步数 ≥ ${minS}）。`;
         } else { warn.textContent = ""; }
       };
       paintWarn();
@@ -783,29 +861,39 @@ export function createTimelinePanel(ctx) {
         const on = [];
         if (P.speed.accel && P.speed.accel !== "off") on.push(`内置注意力加速＝${P.speed.accel}`);
         if (P.speed.sage && P.speed.sage !== "disabled") on.push(`外接 SageAttention＝${P.speed.sage}`);
-        if (P.speed.lora && P.speed.lora !== "(无)") on.push(`蒸馏 LoRA＝${P.speed.lora}（强度 ${P.speed.loraS}）`);
+        const turbo = !!(P.speed.lora && P.speed.lora !== "(无)");
+        if (turbo) on.push(`蒸馏 LoRA＝${P.speed.lora}（强度 ${P.speed.loraS}）`);
         const st = Number(P.output.steps) || 0;
         const up = String(P.output.upscale_mode || "off") !== "off";
         const tips = [];
-        if (st && st < 20) tips.push(`步数只有 ${st}（节点原生默认 25，越低越糊）`);
-        // 步数 / 二采 / 画幅 无论开关状态都要报：
-        // 「糊」的三个头号嫌疑就是 步数低、没二采、分辨率低 —— 一条行里全摆出来，别让用户猜。
+        if (st && st < 16) tips.push(`步数只有 ${st}（社区基线 16–20，<15 画质明显下降）`);
         const rw = Number(P.output.width) || 0, rh = Number(P.output.height) || 0;
         const resTxt = (rw && rh) ? `｜画幅 ${rw}×${rh}（${(rw * rh / 1048576).toFixed(2)}MP）` : "";
         const tail = `｜步数 ${st}${up ? " · 出片后二采已开" : " · 出片后二采未开（开它能明显提清晰度）"}` + resTxt;
-        if (on.length) {
+        // 社区分级：SageAttention 近乎无损（成片可开）；block_sparse 低损；蒸馏 LoRA 真吃音质（仅预览）。
+        const hasSage = P.speed.accel === "sage" || !!(P.speed.sage && P.speed.sage !== "disabled");
+        const hasLossy = P.speed.accel === "block_sparse" || turbo;
+        if (turbo) {
           accelStatus.style.color = "#ffd9a8";
-          accelStatus.textContent = `⚠ 正在加速：${on.join("｜")}。这些都是「速度换画质/音质」的开关 ——`
-            + ` 视频发糊、细节少时先点下面「🧼 一键最佳画质」全关掉再对比`
+          accelStatus.textContent = `⚠ 蒸馏 LoRA＝${P.speed.lora} 在跑 —— 社区实测损伤音质（杂音/爆音），只用于快速预览；`
+            + `出成片点「🧼 一键最佳画质」或选「标准 / 成品」档位关掉它`
             + (tips.length ? `。另外：${tips.join("；")}。` : "。") + tail;
+        } else if (hasLossy) {
+          accelStatus.style.color = "#ffd9a8";
+          accelStatus.textContent = `⚠ 正在加速：${on.join("｜")}（block_sparse 属低损加速，细节极敏感时再关；别与外接加速叠加）`
+            + (tips.length ? `。另外：${tips.join("；")}。` : "。") + tail;
+        } else if (hasSage) {
+          accelStatus.style.color = tips.length ? "#ffd9a8" : "#8ff0c0";
+          accelStatus.textContent = `✅ SageAttention int8（社区首选 · 近乎无损 · 2–4×，成片可用）`
+            + (tips.length ? `。⚠ ${tips.join("；")}。` : "") + tail;
         } else {
           accelStatus.style.color = tips.length ? "#ffd9a8" : "#8ff0c0";
-          accelStatus.textContent = (tips.length ? `⚠ ${tips.join("；")}。` : "✅ 没有开任何加速（画质最好）") + tail;
+          accelStatus.textContent = (tips.length ? `⚠ ${tips.join("；")}。` : "✅ 没有开任何加速（绝对画质，最慢；社区成片普遍开 SageAttention 提速 2–4×，近乎无损）") + tail;
         }
       };
       paintAccelStatus();
       const bestBtn = h("button", { class: "btn btn-primary", style: { padding: "4px 10px", fontSize: 11.5 },
-        title: "一键回到最佳画质：步数 25（节点原生默认）+ 出片后自动二采 + 关掉内置注意力加速 / 外接 SageAttention / 蒸馏 LoRA",
+        title: "一键回到最佳画质：步数 20（社区成片基线）+ 出片后自动二采 + 关掉内置注意力加速 / 外接 SageAttention / 蒸馏 LoRA",
         onclick: resetToBestQuality }, "🧼 一键最佳画质");
       const loraPool = ["(无)"].concat((opts.loras || []).filter((n) => /(H3|h3|minimax).*(step|turbo)|(step|turbo).*(h3|H3|minimax)|Acc-8Step|Acc-4Step|8step|4step/i.test(n)));
       const accLoraE = sel(loraPool, P.speed.lora); accLoraE.onchange = () => { P.speed.lora = accLoraE.value; paintAccelStatus(); };
@@ -829,9 +917,9 @@ export function createTimelinePanel(ctx) {
       //   block_sparse = 官方 Block-Sparse-Attention（需本地编译；sm_80–sm_100）
       // 后端不可用/抛错 → 自动降级（block_sparse→sage→off），绝不阻断出片。
       const ACCEL_MODES = [
-        ["off", "关闭（官方 attention · 画质最好）"],
-        ["sage", "SageAttention int8（略快 · 可能轻微降画质）"],
-        ["block_sparse", "官方 Block-Sparse-Attention（需编译）"],
+        ["off", "关闭（官方 attention · 绝对画质 · 最慢）"],
+        ["sage", "SageAttention int8（社区首选 · 近乎无损 · 2–4×）"],
+        ["block_sparse", "官方 Block-Sparse-Attention（低损 · 需本地编译）"],
       ];
       const accelE = sel(ACCEL_MODES.map((m) => m[0]), P.speed.accel || "off");
       const accelNote = h("span", { class: "muted", style: { fontSize: 10.5, opacity: 0.85,
@@ -959,11 +1047,11 @@ export function createTimelinePanel(ctx) {
       row.append(
         // 加速总览 + 一键回退放最前面：用户抱怨画质时第一眼就能看到并一键关掉
         h("div", { class: "tl-field", style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 } },
-          h("div", { class: "tl-flabel", title: "当前生效的加速项。每一项都是「速度换画质」—— 视频发糊/细节少时优先关掉它们" }, "加速状态（画质被吃掉先看这里）"),
+          h("div", { class: "tl-flabel", title: "当前生效的加速项。社区分级：SageAttention 近乎无损（成片可开）／block_sparse 低损／蒸馏 LoRA 吃音质（仅预览）" }, "加速状态（画质被吃掉先看这里）"),
           accelStatus,
           h("div", { class: "row", style: { gap: 6, flexWrap: "wrap", alignItems: "center" } },
             bestBtn,
-            h("span", { class: "muted", style: { fontSize: 11 } }, "＝ 25 步 + 出片后二采 + 关掉全部加速"))),
+            h("span", { class: "muted", style: { fontSize: 11 } }, "＝ 20 步 + 出片后二采 + 关掉全部加速"))),
         h("div", { class: "tl-field", style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 } },
           h("div", { class: "tl-flabel", title: "外部模型节点 / 第三方加速节点接口：外接后内置加速自动失效" }, "外部节点（模型 / 加速）"),
           h("div", { class: "row", style: { gap: 8, flexWrap: "wrap", alignItems: "center" } }, scanBtn, forceCk, extLbl),
@@ -1485,6 +1573,9 @@ export function createTimelinePanel(ctx) {
       ref_max_size: P.output.ref_size, frame_rate: P.output.fps, steps: P.output.steps,
       ref_image_size: P.output.ref_image_size || "match",
       cfg: P.output.cfg, shift_video: P.output.shift_video, shift_audio: P.output.shift_audio,
+      // T8 双时钟分离采样（社区低步数提速方案）：false 也显式下发，防旧缓存/旧 widget 残留 true
+      dual_clock: !!P.output.dual_clock,
+      steps_audio: P.output.dual_clock ? Math.max(0, Math.round(Number(P.output.steps_audio) || 0)) : 0,
       sampler: P.output.sampler || undefined, scheduler: P.output.scheduler || undefined,
       clear_vram_between_segments: !!P.output.clear_vram,
       export_source_images: !!P.output.export_src,
@@ -1517,19 +1608,24 @@ export function createTimelinePanel(ctx) {
     Object.keys(o).forEach((k) => { if (o[k] === undefined || o[k] === "" || o[k] === null) delete o[k]; });
     return o;
   };
+  // 二采输出目录（会话级记忆）：整条连跑自动二采时不必每镜弹一次文件夹选择，本次会话选定后沿用
+  let _upOutDir = "";
   // 二采高清放大（自动/手动共用）：对 rel 视频用当前引擎超分，更新 shotPreview
   const doUpscale = async (i, rel) => {
     const eng = P.output.upscale_engine || "rtx";
     // 放大倍率（用户可自定义）：RTX/Flash/VOSR2 直接吃倍数；SeedVR2 由后端按"源短边×倍率"换算目标短边
     const sc = Math.max(1, Math.min(4, Number(P.output.upscale_scale) || 2));
-    const opts = eng === "rtx" ? { scale: sc, quality: "HIGH" } : eng === "seedvr2" ? { scale: sc } : eng === "vosr2" ? { scale: sc } : {};
-    // 弹文件夹选择：二采视频保存到选定文件夹
-    let outDir = "";
-    try {
-      const pick = await ctx.api.nativePick({ kind: "folder", title: "选择二采视频保存文件夹" });
-      if (pick.cancel || !(pick.paths || []).length) { println("✗ 已取消二采", "#ffd98f"); return null; }
-      outDir = pick.paths[0];
-    } catch (_) { /* 弹不出则输出到视频同目录 */ }
+    // ⚠ 所有引擎都要带 scale：flash（TE-FlashVSR）以前漏传 → 后端固定 2×，工具栏倍率对它无效
+    const opts = eng === "rtx" ? { scale: sc, quality: "HIGH" } : { scale: sc };
+    // 弹文件夹选择：二采视频保存到选定文件夹（本次会话记住，之后每镜自动沿用；弹不出则输出到视频同目录）
+    let outDir = _upOutDir;
+    if (!outDir) {
+      try {
+        const pick = await ctx.api.nativePick({ kind: "folder", title: "选择二采视频保存文件夹（本次会话内记住，后续不再询问）" });
+        if (pick.cancel || !(pick.paths || []).length) { println("✗ 已取消二采", "#ffd98f"); return null; }
+        outDir = _upOutDir = pick.paths[0];
+      } catch (_) { /* 弹不出则输出到视频同目录 */ }
+    }
     println(`✨ 二采（${eng} · ${sc}×）…`, "#7fd0ff");
     try {
       const r = await ctx.api.h3Upscale(rel, eng, outDir ? { ...opts, out_dir: outDir } : opts);
