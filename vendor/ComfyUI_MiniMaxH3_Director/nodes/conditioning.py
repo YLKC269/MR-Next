@@ -96,6 +96,31 @@ def _task_hint(task_key: str, ref_images, ref_videos) -> str:
     return hint
 
 
+def _call_official_execute(fn, **values):
+    """按**参数名**调用官方节点 execute，而不是按位置。
+
+    为什么必须这样：ComfyUI 在不同版本里改过官方节点的参数顺序 ——
+    例如 `MiniMaxH3ReferenceToVideo.execute` 从
+        (clip, vae, audio_vae, prompt, width, height, length, ref_image_size, ...)   ← 旧
+    改成了
+        (clip, prompt, width, height, length, ref_image_size, vae, audio_vae, ...)   ← 0.35.x
+    继续按位置传就会整体错位：height 收到的是 prompt 字符串 → 在
+    `_empty_av_latent` 里 `height // 16` 直接抛
+    `TypeError: unsupported operand type(s) for //: 'str' and 'int'`。
+    按名传参对两代签名都成立（不存在的参数会被跳过，交给官方默认值）。
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = None
+    if params is None:                      # 拿不到签名 → 退回按名硬传（会自然报错）
+        return fn(**{k: v for k, v in values.items() if v is not None})
+    kw = {k: v for k, v in values.items() if k in params and v is not None}
+    return fn(**kw)
+
+
 def run_minimax_conditioning(
     *,
     clip,
@@ -132,30 +157,20 @@ def run_minimax_conditioning(
     if use_reference:
         if audio_vae is None:
             raise ValueError("MiniMax H3 r2v/v2v/rv2v / reference conditioning requires audio_vae.")
-        out = MiniMaxH3ReferenceToVideo.execute(
-            clip,
-            vae,
-            audio_vae,
-            prompt,
-            width,
-            height,
-            length,
-            ref_image_size,
-            ref_images=ref_images,
-            ref_videos=ref_videos,
-            ref_video_audios=ref_video_audios,
-            ref_audios=ref_audios,
+        out = _call_official_execute(
+            MiniMaxH3ReferenceToVideo.execute,
+            clip=clip, vae=vae, audio_vae=audio_vae, prompt=prompt,
+            width=width, height=height, length=length,
+            ref_image_size=ref_image_size,
+            ref_images=ref_images or None, ref_videos=ref_videos or None,
+            ref_video_audios=ref_video_audios or None, ref_audios=ref_audios or None,
         )
     else:
-        out = MiniMaxH3ImageToVideo.execute(
-            clip,
-            vae,
-            prompt,
-            width,
-            height,
-            length,
-            first_frame=first_frame,
-            last_frame=last_frame,
+        out = _call_official_execute(
+            MiniMaxH3ImageToVideo.execute,
+            clip=clip, vae=vae, prompt=prompt,
+            width=width, height=height, length=length,
+            first_frame=first_frame, last_frame=last_frame,
         )
 
     positive, latent = _unpack_positive_latent(out)
