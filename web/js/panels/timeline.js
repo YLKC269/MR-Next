@@ -38,36 +38,25 @@ const MODE_HINT = {
 const PX = 16; // 每秒像素
 const IMG_CAP = 9;
 
-// ---------- LoRA ↔ 基座 家族判定（防「拿错 LoRA 直接跑崩」）----------
-// 社区硬约束：LoRA 必须与基座**同架构同精度族**。混用（bf16 LoRA × pruned-int8 基座、
-// Ref2VA LoRA × FL2VA 基座、Krea2/LTX 的 LoRA × H3…）在采样期直接抛
-// `Input and weight inner dimensions must match`，且报错信息完全不提示原因。
-// 这里按文件名特征做前置判定，在 UI 上直接标红，并在出片日志里带一句可执行的提示。
+// ---------- LoRA 家族判定（只拦「结构上根本不对」的 LoRA）----------
+// ⚠ 历史教训：早先这里按文件名推断「精度族 / 任务族」（bf16 LoRA × pruned 基座、
+// Ref2VA LoRA × FL2VA 基座…）并标红 —— **那是误判**，会造成"明明能用却被判不能用"：
+//   * 名字里的 bf16 / fp16 是 **LoRA 文件自身的存储精度**，不是「要求 bf16 基座」；
+//     配 pruned-int8 基座是正常用法（官方导演台就是这么跑的）。
+//   * ref2v / fl2v 变体互配时，ComfyUI 对不上的 LoRA key 是**跳过**（最多打一条
+//     "lora key not loaded"），照样出片 —— 不是错误。
+// 真正跑不了的只有「完全不属于 H3/MiniMax 的 LoRA」（Krea2 / LTX / 放大模型…）：
+// 它们的 key 与 H3 一个都对不上 = 等于没加载。所以这里改成**黑名单**：
+// 只拦已知的非 H3 家族，其余（含 bf16 / pruned / ref2v / fl2v 各种变体）一律放行。
 const NON_H3_LORA_RE = /(krea2|ltx|clearreality|seedvr|vosr|esrgan|realesrgan|swinir)/i;
-const H3_LORA_RE = /(h3|minimax|fl2v|ref2v|mmh3|wushu|mystic|t8-)/i;
 const TURBO_LORA_RE = /(turbo|acc[-_ ]?\d*step|\d+\s*step|nfe|\d+\s*步)/i;
-const isH3Lora = (n) => !!n && !NON_H3_LORA_RE.test(String(n)) && H3_LORA_RE.test(String(n));
-const loraTags = (n) => {
-  const s = String(n || "").toLowerCase();
-  return { pruned: /pruned/.test(s), bf16: /bf16|fp16|fp8/.test(s),
-           fl2v: /fl2v|fl2va/.test(s), ref2v: /ref2v|ref2va/.test(s),
-           hybrid: /hybrid|curveproj/.test(s), other: NON_H3_LORA_RE.test(s) };
-};
-const unetTags = (n) => {
-  const s = String(n || "").toLowerCase();
-  return { prunedInt8: /pruned|int8|convrot|w4a8/.test(s), bf16: /bf16|fp8/.test(s),
-           fl2v: /fl2v|fl2va/.test(s), ref2v: /ref2v|ref2va/.test(s), hybrid: /hybrid/.test(s) };
-};
-// 返回冲突说明（空串 = 没发现问题）。这是出片失败最常见的可诊断原因。
-const loraUnetConflict = (lora, unet) => {
-  if (!lora || lora === "(无)" || !unet) return "";
-  const L = loraTags(lora), U = unetTags(unet);
-  if (L.other) return `「${lora}」不是 H3/MiniMax 的 LoRA（Krea2 / LTX / 放大模型等），喂给 H3 基座必然维度不匹配`;
-  if (L.hybrid && !U.hybrid) return `「${lora}」是 hybrid（fl2va+ref2va 混合）变体专用，当前基座 ${unet} 不是 hybrid 版`;
-  if (L.bf16 && U.prunedInt8) return `「${lora}」是 bf16/fp8 基座专用，当前基座是 pruned/int8 —— 社区明确不兼容，必报 "Input and weight inner dimensions must match"`;
-  if (L.pruned && U.bf16) return `「${lora}」是 pruned 剪枝基座专用，当前基座是 bf16/fp8 精度`;
-  if (L.ref2v && !L.fl2v && U.fl2v && !U.ref2v) return `「${lora}」是 Ref2VA（参考生视频）专用，当前基座是 FL2VA 首尾帧权重`;
-  if (L.fl2v && !L.ref2v && U.ref2v && !U.fl2v) return `「${lora}」是 FL2VA 首尾帧专用，当前基座是 Ref2VA 权重`;
+const isForeignLora = (n) => !!n && NON_H3_LORA_RE.test(String(n));
+// 返回提示（空串 = 放行）。只对「完全不是 H3 家族」的 LoRA 报警。
+const loraUnetConflict = (lora) => {
+  if (!lora || lora === "(无)") return "";
+  if (isForeignLora(lora)) {
+    return `「${lora}」不是 H3/MiniMax 的 LoRA（Krea2 / LTX / 放大模型等），key 与 H3 对不上 = 等于没加载，请改用 H3 的 LoRA`;
+  }
   return "";
 };
 
@@ -608,11 +597,12 @@ export function createTimelinePanel(ctx) {
         }
       };
       avaeE.onchange = () => { P.model.avae = avaeE.value; syncAvaeNote(); };
-      // 模型页 LoRA：只列 H3/MiniMax 家族（Krea2 / LTX / 放大模型混进来必崩：维度不匹配）
-      const loraE = sel(["(无)"].concat((opts.loras || []).filter((n) => isH3Lora(n))), P.model.lora);
+      // 模型页 LoRA：只排除**已知的非 H3 家族**（Krea2 / LTX / 放大模型…）；
+      // 其余一律列出（bf16 / pruned / ref2v / fl2v 各变体都能用，官方导演台同款行为）。
+      const loraE = sel(["(无)"].concat((opts.loras || []).filter((n) => !isForeignLora(n))), P.model.lora);
       const loraWarn = h("div", { class: "muted", style: { gridColumn: "1 / -1", fontSize: "11px", lineHeight: "1.55" } });
       const paintLoraWarn = () => {
-        const msg = loraUnetConflict(loraE.value, P.model.unet);
+        const msg = loraUnetConflict(loraE.value);
         loraWarn.textContent = msg ? "⚠ " + msg : "";
         loraWarn.style.color = msg ? "#ffb4b4" : "";
       };
@@ -944,11 +934,11 @@ export function createTimelinePanel(ctx) {
       // 蒸馏 LoRA 池：**必须同时**属于 H3 家族 + 带 turbo/步数标记。
       // ⚠ 旧正则里的裸 `4step|8step` 会把 `krea2_turbo_4step_*`（Krea2 图像模型的 LoRA）
       //    也收进来 —— 选它跑 H3 直接报 "Input and weight inner dimensions must match"。
-      const loraPool = ["(无)"].concat((opts.loras || []).filter((n) => isH3Lora(n) && TURBO_LORA_RE.test(n)));
+      const loraPool = ["(无)"].concat((opts.loras || []).filter((n) => !isForeignLora(n) && TURBO_LORA_RE.test(n)));
       const accLoraE = sel(loraPool, P.speed.lora);
       const accLoraWarn = h("div", { class: "muted", style: { gridColumn: "1 / -1", fontSize: "11px", lineHeight: "1.55" } });
       const paintAccLoraWarn = () => {
-        const msg = loraUnetConflict(accLoraE.value, P.model.unet);
+        const msg = loraUnetConflict(accLoraE.value);
         accLoraWarn.textContent = msg ? "⚠ " + msg : "";
         accLoraWarn.style.color = msg ? "#ffb4b4" : "";
       };
@@ -1944,13 +1934,14 @@ export function createTimelinePanel(ctx) {
           + "去「🧠 模型」页一键切到 " + (refUnetName() || "ref2va 权重") + " 再重跑本镜");
       }
     } catch (_) {}
-    // LoRA × 基座 家族冲突回执：这是采样期「Input and weight inner dimensions must match」
-    // 的头号原因（报错信息本身完全不提示是 LoRA 的问题）。出片前就告知，省一轮白等。
+    // LoRA 家族回执：只提示「完全不属于 H3」的 LoRA（key 对不上 = 等于没加载）。
+    // 不再按 bf16/pruned/ref2v/fl2v 之类的文件名特征判"不兼容"——那是误判：
+    // LoRA 的 bf16 是它自己的存储精度，任务族变体互配时 ComfyUI 只会跳过对不上的 key。
     try {
       const _slots = [["模型页 LoRA", P.model.lora], ["蒸馏 LoRA", P.speed.lora]];
       for (const [slot, name] of _slots) {
-        const msg = loraUnetConflict(name, P.model.unet);
-        if (msg) _warns.push(`${slot}：${msg} —— 换成配套 LoRA，或先设为「(无)」再跑本镜`);
+        const msg = loraUnetConflict(name);
+        if (msg) _warns.push(`${slot}：${msg} —— 或先设为「(无)」再跑本镜`);
       }
     } catch (_) {}
     println(`▶ 第${sh.index}镜（${modeLabel(P.mode)} · ${sec}s · ${isFramesMode
