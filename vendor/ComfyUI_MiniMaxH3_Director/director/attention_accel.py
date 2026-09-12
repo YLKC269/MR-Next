@@ -460,7 +460,12 @@ def build_attention_override(mode: str, *, sparsity: float = 0.0, min_seq: int =
             )
         out = _run(qq, kk, vv, int(heads), **kwargs)
         if out is not None:
-            return out
+            # sage / block_sparse 出 HND → 必须按调用方契约还原成 [B, S, H*D]。
+            # ⚠ 这里曾直接 `return out`（v1.11.22 只修了下面的原生回退分支，漏了这条
+            #   **sage 成功路径** —— 而 H3 走的恰恰是这条）→ out_proj 收到 k=head_dim
+            #   → comfy_kitchen int8 断言 "Input and weight inner dimensions must match"，
+            #   采样第 0 步即崩。这是「开内置 sage 就崩」的真正残留点。
+            return _restore_output_layout(_to_hnd(out, qq), qq, kwargs)
         try:
             raw = _call_native(None, qq, kk, vv, heads, kwargs)
         except Exception as exc:  # noqa: BLE001
