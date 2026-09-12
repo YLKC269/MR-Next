@@ -135,20 +135,20 @@ class MRBoardStudio:
         if shots:
             try:
                 from ..server import h3shot as _h3
-                # 合并各镜文本为一条时间线描述（t2v 单 Director 出整段）
-                texts = [s.get("prompt") or s.get("text") or "" for s in shots]
-                texts = [t.strip() for t in texts if t.strip()]
-                merged = "。".join(texts) if texts else ""
-                if merged:
-                    # ⚠ 模式固定 t2v：本节点这条路径只有「分镜文本」，没有首帧/尾帧/参考图输入，
-                    #    i2v / fl2v / r2v 需要素材槽 —— 那些走面板的「▶ 出片」（面板按镜带素材）。
-                    opts = {"width": 864, "height": 480, "steps": 8,
+                # ★ 复刻官方导演台：把「逐镜」原样交给官方 Director —— 构造官方 v5 多段时间线
+                #   （每镜一个 segment：自己的 prompt / 帧数 / 与前镜连续性），
+                #   官方节点逐段生成 + 音轨拼接 + 连续性处理，就是官方导演台的原生行为。
+                #   ⚠ 以前是把所有镜的提示词拼成一条 t2v（12 镜 → 一段 15 秒）
+                #     → N 个角色挤进同一段互相污染 = 用户看到的"人物乱入"。
+                texts = [str(s.get("prompt") or s.get("text") or "").strip() for s in shots]
+                if any(texts):
+                    # 默认按官方值（25 步 / 864×480）；params_json 或 _params.json 可覆盖。
+                    opts = {"width": 864, "height": 480, "steps": 25,
                             "sampler": "res_multistep", "scheduler": "simple"}
                     opts.update({k: v for k, v in params.items()
                                  if k not in ("mode", "seconds", "frame_rate")})
                     graph = _h3.build_shot_graph(
-                        "t2v", merged, seed=int(seed) if seed else 0,
-                        seconds=float(params.get("seconds") or max(3.0, min(15.0, count * 5.0))),
+                        "t2v", "", seed=int(seed) if seed else 0, shots=shots,
                         frame_rate=float(params.get("frame_rate") or 24.0),
                         opts=opts)
                     sv_ids = [nid for nid, n in graph.items() if n.get("class_type") == "SaveVideo"]

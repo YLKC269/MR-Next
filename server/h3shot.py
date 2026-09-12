@@ -586,11 +586,74 @@ def _deep_replace_num(obj, old_num, new_num):
     return go(obj)
 
 
+def build_timeline_from_shots(shots, *, task_type, frame_rate=24.0, width=864, height=480,
+                              common_prompt="", continuity=False, continuity_overlap=22,
+                              export_mode="all", audio_mode="generate",
+                              ref_image_size="match") -> dict:
+    """把逐镜数据打成官方导演台的 **v5 多段时间线**（严格复刻官方 pack.py 的 schema）。
+
+    ⚠ 为什么必须多段：官方导演台的工作方式就是「每个分镜 = 一个 segment，各自带
+    prompt / 帧数 / 参考槽 / 与前镜连续性」，由官方节点逐段生成、再拼音轨。
+    以前这条节点路径把**所有镜的提示词拼成一条 t2v**（12 镜 → 一段 15 秒）→
+    N 个角色挤进同一段、互相污染 → 用户看到"人物乱入"。
+
+    帧数按官方约定对齐到 17n+5（H3 生成式时间线的合法帧数）。
+    """
+    fps = float(frame_rate or 24.0)
+    segs: list[dict] = []
+    cursor = 0
+    for i, s in enumerate(shots or []):
+        if not isinstance(s, dict):
+            continue
+        pr = str(s.get("prompt") or s.get("text") or "").strip()
+        if not pr:
+            continue
+        try:
+            sec = float(s.get("sec") or 0) or 5.0
+        except (TypeError, ValueError):
+            sec = 5.0
+        ln = _frame_count(sec, fps)
+        segs.append({
+            "id": f"g{i}", "start": cursor, "length": ln, "frameCount": ln,
+            "durationSec": sec, "prompt": pr, "negativePrompt": "",
+            "taskType": "", "refs": [], "refAudios": [], "refVideos": [],
+            "continuityFromPrev": bool(s.get("linkNext")),
+            "refImageSize": None, "genImage": {"imageFile": ""}, "imageFile": "",
+            "startImage": None, "endImage": None,
+        })
+        cursor += ln
+    if not segs:
+        segs = [{"id": "g0", "start": 0, "length": 124, "frameCount": 124,
+                 "prompt": "", "refs": [], "refAudios": [], "refVideos": [],
+                 "genImage": {"imageFile": ""}}]
+        cursor = 124
+    return {
+        "version": 5,
+        "timelineMode": "prompt_batch",
+        "editMode": "segment",
+        "frameRate": fps,
+        "totalFrames": cursor,
+        "global": {"taskType": task_type, "prompt": common_prompt or "",
+                   "commonEnabled": bool(common_prompt), "commonCollapsed": False,
+                   "refs": [], "refAudios": [], "refVideos": [],
+                   "referenceVideo": {}, "continuousReference": False},
+        "output": {"mode": "fixed", "width": int(width), "height": int(height),
+                   "exportMode": export_mode, "audioMode": audio_mode,
+                   "refImageSize": ref_image_size,
+                   "continuityEnabled": bool(continuity),
+                   "continuityOverlapFrames": int(continuity_overlap)},
+        "segments": segs,
+        "video": {"fileName": "", "videoFile": "", "subfolder": "", "type": "input",
+                  "frames": [], "frameMap": []},
+        "videoClips": [], "runSelectEnabled": False, "runSelection": [],
+    }
+
+
 def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
                      first_frame=None, last_frame=None, refs=None, audios=None,
                      ref_by_num=None, audio_by_num=None, videos=None, video_by_num=None,
                      common_prompt=None, common_enabled=None,
-                     _variant=None, steps=None, cfg=None, opts=None):
+                     _variant=None, steps=None, cfg=None, opts=None, shots=None):
     """返回 API prompt dict（数字字符串 node id）。
 
     opts 字段（覆盖官方默认）：unet_name, clip_name, video_vae_name, audio_vae_name, lora_name,
@@ -686,6 +749,16 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             widget["cfg"] = float(cfg)
         except Exception:  # noqa: BLE001
             pass
+    # ★ 多段模式（shots 传入时）：复刻官方导演台 —— 每个分镜一个 segment，
+    #   各自带 prompt/帧数/连续性，官方节点逐段生成 + 拼音轨。
+    if shots and mode not in _GROUP_MODES:
+        _wv_t = list(director.get("widgets_values") or [])
+        _td_multi = build_timeline_from_shots(
+            shots, task_type=str((_wv_t[0] if _wv_t else "") or ""),
+            frame_rate=float(frame_rate))
+        widget["timeline_data"] = json.dumps(_td_multi, ensure_ascii=False)
+        widget["total_frames"] = int(_td_multi["totalFrames"])  # 防被后续 sync 写回模板值
+        widget["global_prompt"] = ""   # 每段各带 prompt，global 留空避免重复注入
     # H3 官方百万像素（0.1–2）：按当前比例换算出宽高（与前端同一算式，后端兜底 → 一定生效）
     _mp = opts_obj.get("megapixels")
     if _mp:
@@ -709,24 +782,27 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
 
     if mode not in _GROUP_MODES:
         # t2v：单节点 + timeline 替换
-        # 公共提示词：单节点没有 group 可走官方 commonEnabled 通道 → 本节点按官方同款规则拼在最前
-        if common_prompt and common_enabled:
-            prompt = concat_common(common_prompt, prompt)
-            widget["global_prompt"] = prompt
-        total = _frame_count(seconds, float(frame_rate))
-        widget["total_frames"] = total
-        td = json.loads(str(widget.get("timeline_data") or "{}"))
-        wv = list(director.get("widgets_values") or [])
-        orig_prompt = wv[1]
-        try:
-            orig_total = int(wv[10])
-        except Exception:  # noqa: BLE001
-            orig_total = total
-        if orig_prompt and orig_prompt != prompt:
-            td = _deep_replace_str(td, orig_prompt, prompt)
-        if orig_total != total and orig_total >= 100:
-            td = _deep_replace_num(td, orig_total, total)
-        widget["timeline_data"] = json.dumps(td, ensure_ascii=False)
+        # ⚠ 多段模式（shots 传入）已在上面把整条 timeline 换掉了 —— 这里不能再做
+        #   「把模板单段提示词/总帧深替换」的动作，否则会把多段打回单段。
+        if not shots:
+            # 公共提示词：单节点没有 group 可走官方 commonEnabled 通道 → 本节点按官方同款规则拼在最前
+            if common_prompt and common_enabled:
+                prompt = concat_common(common_prompt, prompt)
+                widget["global_prompt"] = prompt
+            total = _frame_count(seconds, float(frame_rate))
+            widget["total_frames"] = total
+            td = json.loads(str(widget.get("timeline_data") or "{}"))
+            wv = list(director.get("widgets_values") or [])
+            orig_prompt = wv[1]
+            try:
+                orig_total = int(wv[10])
+            except Exception:  # noqa: BLE001
+                orig_total = total
+            if orig_prompt and orig_prompt != prompt:
+                td = _deep_replace_str(td, orig_prompt, prompt)
+            if orig_total != total and orig_total >= 100:
+                td = _deep_replace_num(td, orig_total, total)
+            widget["timeline_data"] = json.dumps(td, ensure_ascii=False)
         d_ins = {"model": link(u), "video_vae": link(vv), "audio_vae": link(av), "clip": link(c)}
         d_ins.update(widget)
         maybe_refine(d_ins, u)
