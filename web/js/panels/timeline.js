@@ -744,42 +744,42 @@ export function createTimelinePanel(ctx) {
       // 采样设置页排版：以前 15 个字段平铺在 auto-fill 网格里 → 宽容器下大片留白、
       // 画质档位按钮被挤成竖排。现在分成 3 个视觉子组（全宽横条），每组内部自带网格，
       // 画质档位拿最宽的一格保证按钮横排。
+      // ⚠ 子组各用命名变量再 append：内联 6 层嵌套的括号极易漏一个（漏了就是整块面板空白）。
       const subSection = (title, ...kids) => h("div", { style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 5, padding: "5px 8px 7px", border: "1px solid rgba(120,170,255,.1)", borderRadius: 6, background: "rgba(8,16,32,.35)" } },
         h("div", { class: "muted", style: { fontSize: 10, fontWeight: 600, color: "#6f88a8", letterSpacing: ".4px" } }, title),
         ...kids);
-      row.append(
-        // —— 子组 1：采样核心（步数 · 画质档位 · 双时钟）——
-        subSection("采样核心",
-          h("div", { style: { display: "grid", gridTemplateColumns: "minmax(80px, 1fr) minmax(220px, 2.5fr) minmax(140px, 1.1fr)", gap: 8, alignItems: "start" } },
-            field("步数", stepsE, "steps (1-200)"),
-            field("画质档位", qualWrap, "社区两套方案：预览（6 步+Turbo+双时钟）/ 标准 16 步 / 成品 20 步+二采"),
-            field("双时钟·音频步数", dcWrap, "dual_clock / steps_audio：视频低步数提速时音频独立推进，防爆音；不支持时自动回退单时钟"))),
-        // —— 子组 2：采样器与引导 —— 六个小输入一排
-        subSection("采样器与引导",
-          h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(118px, 1fr))", gap: 6 } },
-            field("采样器", samplerE, "sampler"),
-            field("调度器", schedE, "scheduler"),
-            field("CFG 引导", cfgE, "cfg"),
-            field("种子", seedE, "seed"),
-            field("视频 shift", sVE, "shift_video"),
-            field("音频 shift", sAE, "shift_audio"))),
-        // —— 子组 3：采样方案 · 参考 · 段间 ——
-        subSection("采样方案 · 参考 · 段间",
-          h("div", { style: { display: "flex", flexDirection: "column", gap: 7 } },
-            field("采样方案", presetWrap, "采样器+调度器组合预设（点击切换）"),
-            h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(126px, 1fr))", gap: 6 } },
-              field("参考图尺寸", refE, "ref_max_size"),
-              field("参考图缩放", refImgSizeE, "ref_image_size（官方 match / max）"),
-              h("div", { style: { gridColumn: "span 2", minWidth: 0, display: "flex", flexDirection: "column", gap: 3 } },
-                h("div", { class: "tl-flabel", title: "官方 continuityEnabled：段与段之间用重叠帧衔接（与「衔接下镜」的提示词级衔接是两回事）" }, "段间连续性"),
-                h("div", { class: "row", style: { gap: 6 } }, contCk,
-                  h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 continuityEnabled：段与段之间用重叠帧衔接" }, "continuityEnabled"),
-                  contOvSel)),
-              h("div", { style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 3 } },
-                h("div", { class: "tl-flabel" }, "导出与显存"),
-                h("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } },
-                  ck(P.output.clear_vram, (v) => { P.output.clear_vram = v; }, "段间清显存", "clear_vram_between_segments"),
-                  ck(P.output.export_src, (v) => { P.output.export_src = v; }, "导出源图", "export_source_images"))))));
+      const secCore = subSection("采样核心",
+        h("div", { style: { display: "grid", gridTemplateColumns: "minmax(80px, 1fr) minmax(220px, 2.5fr) minmax(140px, 1.1fr)", gap: 8, alignItems: "start" } },
+          field("步数", stepsE, "steps (1-200)"),
+          field("画质档位", qualWrap, "社区两套方案：预览（6 步+Turbo+双时钟）/ 标准 16 步 / 成品 20 步+二采"),
+          field("双时钟·音频步数", dcWrap, "dual_clock / steps_audio：视频低步数提速时音频独立推进，防爆音；不支持时自动回退单时钟")));
+      const secSampler = subSection("采样器与引导",
+        h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(118px, 1fr))", gap: 6 } },
+          field("采样器", samplerE, "sampler"),
+          field("调度器", schedE, "scheduler"),
+          field("CFG 引导", cfgE, "cfg"),
+          field("种子", seedE, "seed"),
+          field("视频 shift", sVE, "shift_video"),
+          field("音频 shift", sAE, "shift_audio")));
+      const contRow = h("div", { style: { gridColumn: "span 2", minWidth: 0, display: "flex", flexDirection: "column", gap: 3 } },
+        h("div", { class: "tl-flabel", title: "官方 continuityEnabled：段与段之间用重叠帧衔接（与「衔接下镜」的提示词级衔接是两回事）" }, "段间连续性"),
+        h("div", { class: "row", style: { gap: 6 } }, contCk,
+          h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 continuityEnabled：段与段之间用重叠帧衔接" }, "continuityEnabled"),
+          contOvSel));
+      const outRow = h("div", { style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 3 } },
+        h("div", { class: "tl-flabel" }, "导出与显存"),
+        h("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } },
+          ck(P.output.clear_vram, (v) => { P.output.clear_vram = v; }, "段间清显存", "clear_vram_between_segments"),
+          ck(P.output.export_src, (v) => { P.output.export_src = v; }, "导出源图", "export_source_images")));
+      const secRef = subSection("采样方案 · 参考 · 段间",
+        h("div", { style: { display: "flex", flexDirection: "column", gap: 7 } },
+          field("采样方案", presetWrap, "采样器+调度器组合预设（点击切换）"),
+          h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(126px, 1fr))", gap: 6 } },
+            field("参考图尺寸", refE, "ref_max_size"),
+            field("参考图缩放", refImgSizeE, "ref_image_size（官方 match / max）"),
+            contRow,
+            outRow)));
+      row.append(secCore, secSampler, secRef);
     } else if (key === "audio") {
       // —— 声音 / 台词：H3 官方三段式提示词（治「说话乱说 / 语音乱码」）——
       // H3 音视频联合生成：只给画面描述、不写声音字段 → 模型自行补人声 → 胡言乱语。
