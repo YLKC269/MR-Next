@@ -89,7 +89,9 @@
         "mrboard_next",
         "",
         0,
-        true
+        "randomize",
+        "",
+        ""
       ]
     }
   ],
@@ -97,5 +99,7 @@
   "groups": [],
   "config": {},
   "extra": {},
-  "version": 0.4
+  "version": 0.4,
+  "id": "be34d5fe-eefe-5750-b8fb-7a4ca6de3ec1",
+  "revision": 0
 }

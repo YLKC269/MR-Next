@@ -1,5 +1,5 @@
 {
-  "id": "mrboard-studio-hybrid-ref2v-turbo",
+  "id": "62ca8180-4a66-5da7-b91d-743a5fa1812d",
   "revision": 0,
   "last_node_id": 1,
   "last_link_id": 0,
@@ -100,7 +100,6 @@
         "",
         0,
         "randomize",
-        true,
         "{\n  \"unet_name\": \"minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors\",\n  \"clip_name\": \"qwen3vl_32b_minimax_h3_int8_convrot.safetensors\",\n  \"video_vae_name\": \"minimax_h3_video_vae_fp16.safetensors\",\n  \"audio_vae_name\": \"minimax_h3_audio_vae_fp32.safetensors\",\n  \"speed_lora\": \"minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors\",\n  \"speed_lora_strength\": 1.0,\n  \"steps\": 8,\n  \"cfg\": 1,\n  \"sampler\": \"res_multistep\",\n  \"scheduler\": \"simple\",\n  \"shift_video\": 12,\n  \"shift_audio\": 3,\n  \"width\": 720,\n  \"height\": 1280,\n  \"frame_rate\": 24,\n  \"ref_max_size\": 864,\n  \"attention_accel\": \"off\",\n  \"clear_vram_between_segments\": true,\n  \"export_source_images\": false\n}",
         ""
       ],
