@@ -1,0 +1,944 @@
+{
+  "id": "mrboard-hybrid-ref2v-turbo",
+  "revision": 0,
+  "last_node_id": 11,
+  "last_link_id": 11,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [
+        40,
+        -560
+      ],
+      "size": [
+        360,
+        82
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "unet_name",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "unet_name"
+          }
+        },
+        {
+          "name": "weight_dtype",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "weight_dtype"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "widgets_values": [
+        "minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 2,
+      "type": "CLIPLoader",
+      "pos": [
+        40,
+        -430
+      ],
+      "size": [
+        360,
+        106
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip_name",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "clip_name"
+          }
+        },
+        {
+          "name": "type",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "type"
+          }
+        },
+        {
+          "name": "device",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "device"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "widgets_values": [
+        "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+        "minimax",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
+    },
+    {
+      "id": 3,
+      "type": "VAELoader",
+      "pos": [
+        40,
+        -280
+      ],
+      "size": [
+        360,
+        58
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "vae_name",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "vae_name"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            4
+          ]
+        }
+      ],
+      "widgets_values": [
+        "minimax_h3_video_vae_fp16.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+      }
+    },
+    {
+      "id": 4,
+      "type": "VAELoader",
+      "pos": [
+        40,
+        -180
+      ],
+      "size": [
+        360,
+        58
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "vae_name",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "vae_name"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "widgets_values": [
+        "minimax_h3_audio_vae_fp32.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      }
+    },
+    {
+      "id": 5,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        40,
+        -80
+      ],
+      "size": [
+        360,
+        82
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "name": "lora_name",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "lora_name"
+          }
+        },
+        {
+          "name": "strength_model",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "strength_model"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "widgets_values": [
+        "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+        1.0
+      ],
+      "widgets_values_named": {
+        "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+        "strength_model": 1.0
+      }
+    },
+    {
+      "id": 6,
+      "type": "LoadImage",
+      "pos": [
+        40,
+        60
+      ],
+      "size": [
+        300,
+        320
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "image"
+          }
+        },
+        {
+          "name": "upload",
+          "type": "IMAGEUPLOAD",
+          "link": null,
+          "widget": {
+            "name": "upload"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            6
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "widgets_values": [
+        "reference_1.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "reference_1.png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 7,
+      "type": "MiniMaxH3DirectorGroupReferenceToVideo",
+      "pos": [
+        400,
+        60
+      ],
+      "size": [
+        430,
+        240
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "ref_images.ref_image_0",
+          "type": "IMAGE",
+          "link": 6
+        },
+        {
+          "name": "ref_images.ref_image_1",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "ref_images.ref_image_2",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "ref_videos.ref_video_0",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "ref_video_audios.ref_video_audio_0",
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "name": "ref_audios.ref_audio_0",
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "prompt"
+          }
+        },
+        {
+          "name": "duration_sec",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "duration_sec"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "group",
+          "type": "MMX_DIR_GROUP",
+          "links": [
+            7
+          ]
+        }
+      ],
+      "widgets_values": [
+        "subject_definitions:\n<Picture 1> is the main character, keep identity, hairstyle and outfit exactly as in the reference.",
+        5.0
+      ],
+      "widgets_values_named": {
+        "prompt": "subject_definitions:\n<Picture 1> is the main character, keep identity, hairstyle and outfit exactly as in the reference.",
+        "duration_sec": 5.0
+      }
+    },
+    {
+      "id": 8,
+      "type": "MiniMaxH3Director",
+      "pos": [
+        880,
+        40
+      ],
+      "size": [
+        1030,
+        1180
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 2
+        },
+        {
+          "name": "video_vae",
+          "type": "VAE",
+          "link": 4
+        },
+        {
+          "name": "audio_vae",
+          "type": "VAE",
+          "link": 5
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 3
+        },
+        {
+          "name": "i2v_groups",
+          "type": "MMX_DIR_GROUP",
+          "link": null
+        },
+        {
+          "name": "r2v_groups",
+          "type": "MMX_DIR_GROUP",
+          "link": 7
+        },
+        {
+          "name": "task_type",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "task_type"
+          }
+        },
+        {
+          "name": "global_prompt",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "global_prompt"
+          }
+        },
+        {
+          "name": "bd_grp_sample",
+          "type": "BDGROUP",
+          "link": null,
+          "widget": {
+            "name": "bd_grp_sample"
+          }
+        },
+        {
+          "name": "cfg",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "cfg"
+          }
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "seed"
+          }
+        },
+        {
+          "name": "frame_rate",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "frame_rate"
+          }
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "width"
+          }
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "height"
+          }
+        },
+        {
+          "name": "ref_max_size",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "ref_max_size"
+          }
+        },
+        {
+          "name": "total_frames",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "total_frames"
+          }
+        },
+        {
+          "name": "timeline_data",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "timeline_data"
+          }
+        },
+        {
+          "name": "bd_grp_advanced",
+          "type": "BDGROUP",
+          "link": null,
+          "widget": {
+            "name": "bd_grp_advanced"
+          }
+        },
+        {
+          "name": "steps",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "steps"
+          }
+        },
+        {
+          "name": "sampler",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "sampler"
+          }
+        },
+        {
+          "name": "scheduler",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "scheduler"
+          }
+        },
+        {
+          "name": "shift_video",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "shift_video"
+          }
+        },
+        {
+          "name": "shift_audio",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "shift_audio"
+          }
+        },
+        {
+          "name": "dual_clock",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "dual_clock"
+          }
+        },
+        {
+          "name": "attention_accel",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "attention_accel"
+          }
+        },
+        {
+          "name": "steps_audio",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "steps_audio"
+          }
+        },
+        {
+          "name": "bd_grp_perf",
+          "type": "BDGROUP",
+          "link": null,
+          "widget": {
+            "name": "bd_grp_perf"
+          }
+        },
+        {
+          "name": "clear_vram_between_segments",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "clear_vram_between_segments"
+          }
+        },
+        {
+          "name": "export_source_images",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "export_source_images"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            8
+          ]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            9
+          ]
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": [
+            10
+          ]
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "source_images",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "widgets_values": [
+        "r2v — 参考主体生视频(Reference to Video)",
+        "subject_definitions:\n<Picture 1> is the main character, keep identity, hairstyle and outfit exactly as in the reference.\n\nA cinematic medium shot of <Picture 1> standing in soft warm light, slow push-in, natural micro-motion, shallow depth of field.\n\nAudio: quiet room tone, soft footsteps, no music.\nNo text, logos or watermarks.",
+        "采样设置",
+        1,
+        666,
+        "randomize",
+        24,
+        864,
+        480,
+        864,
+        124,
+        "{\"version\": 4, \"editMode\": \"global\", \"timelineMode\": \"gen_blank\", \"totalFrames\": 124, \"frameRate\": 24.0, \"width\": 864, \"height\": 480, \"refMaxSize\": 864, \"output\": {\"mode\": \"fixed\", \"longEdge\": 864, \"width\": 864, \"height\": 480, \"maxExportFrames\": 0, \"exportMode\": \"all\", \"continuityEnabled\": false, \"continuityOverlapFrames\": 9}, \"videoClips\": [], \"video\": {\"fileName\": \"\", \"videoFile\": \"\", \"subfolder\": \"\", \"type\": \"input\", \"frames\": [], \"frameMap\": []}, \"global\": {\"taskType\": \"r2v — 参考主体生视频(Reference to Video)\", \"prompt\": \"<Picture 1> walks into a neon-lit alley at night. Keep identity and outfit of <Picture 1>. Cinematic lighting, light rain, shallow depth of field. Audio: distant city traffic and soft rain. No text or logos.\", \"refs\": [], \"referenceVideo\": {}, \"continuousReference\": false, \"genImage\": {\"imageFile\": \"\"}}, \"segments\": [{\"id\": \"s0\", \"start\": 0, \"length\": 124, \"frameCount\": 124, \"durationSec\": 5, \"prompt\": \"\", \"taskType\": \"\", \"refs\": [], \"referenceVideo\": {}, \"genImage\": {\"imageFile\": \"\"}, \"negativePrompt\": \"\"}], \"gen\": {\"defaultFrameCount\": 124}, \"runSelectEnabled\": false, \"runSelection\": []}",
+        "高级采样",
+        4,
+        "res_multistep",
+        "simple",
+        12,
+        3,
+        false,
+        "off",
+        0,
+        "性能",
+        true,
+        false
+      ],
+      "widgets_values_named": {
+        "task_type": "r2v — 参考主体生视频(Reference to Video)",
+        "global_prompt": "subject_definitions:\n<Picture 1> is the main character, keep identity, hairstyle and outfit exactly as in the reference.\n\nA cinematic medium shot of <Picture 1> standing in soft warm light, slow push-in, natural micro-motion, shallow depth of field.\n\nAudio: quiet room tone, soft footsteps, no music.\nNo text, logos or watermarks.",
+        "bd_grp_sample": "采样设置",
+        "cfg": 1,
+        "seed": 666,
+        "control_after_generate": "randomize",
+        "frame_rate": 24,
+        "width": 864,
+        "height": 480,
+        "ref_max_size": 864,
+        "total_frames": 124,
+        "timeline_data": "{\"version\": 4, \"editMode\": \"global\", \"timelineMode\": \"gen_blank\", \"totalFrames\": 124, \"frameRate\": 24.0, \"width\": 864, \"height\": 480, \"refMaxSize\": 864, \"output\": {\"mode\": \"fixed\", \"longEdge\": 864, \"width\": 864, \"height\": 480, \"maxExportFrames\": 0, \"exportMode\": \"all\", \"continuityEnabled\": false, \"continuityOverlapFrames\": 9}, \"videoClips\": [], \"video\": {\"fileName\": \"\", \"videoFile\": \"\", \"subfolder\": \"\", \"type\": \"input\", \"frames\": [], \"frameMap\": []}, \"global\": {\"taskType\": \"r2v — 参考主体生视频(Reference to Video)\", \"prompt\": \"<Picture 1> walks into a neon-lit alley at night. Keep identity and outfit of <Picture 1>. Cinematic lighting, light rain, shallow depth of field. Audio: distant city traffic and soft rain. No text or logos.\", \"refs\": [], \"referenceVideo\": {}, \"continuousReference\": false, \"genImage\": {\"imageFile\": \"\"}}, \"segments\": [{\"id\": \"s0\", \"start\": 0, \"length\": 124, \"frameCount\": 124, \"durationSec\": 5, \"prompt\": \"\", \"taskType\": \"\", \"refs\": [], \"referenceVideo\": {}, \"genImage\": {\"imageFile\": \"\"}, \"negativePrompt\": \"\"}], \"gen\": {\"defaultFrameCount\": 124}, \"runSelectEnabled\": false, \"runSelection\": []}",
+        "bd_grp_advanced": "高级采样",
+        "steps": 4,
+        "sampler": "res_multistep",
+        "scheduler": "simple",
+        "shift_video": 12,
+        "shift_audio": 3,
+        "dual_clock": false,
+        "attention_accel": "off",
+        "steps_audio": 0,
+        "bd_grp_perf": "性能",
+        "clear_vram_between_segments": true,
+        "export_source_images": false
+      }
+    },
+    {
+      "id": 9,
+      "type": "CreateVideo",
+      "pos": [
+        1960,
+        60
+      ],
+      "size": [
+        300,
+        120
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 8
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 9
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "link": 10
+        },
+        {
+          "name": "bit_depth",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "bit_depth"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [
+            11
+          ]
+        }
+      ],
+      "widgets_values": [
+        24,
+        8
+      ],
+      "widgets_values_named": {
+        "bit_depth": 8
+      }
+    },
+    {
+      "id": 10,
+      "type": "SaveVideo",
+      "pos": [
+        2300,
+        60
+      ],
+      "size": [
+        330,
+        110
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 11
+        },
+        {
+          "name": "filename_prefix",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "filename_prefix"
+          }
+        },
+        {
+          "name": "format",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "format"
+          }
+        },
+        {
+          "name": "codec",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "codec"
+          }
+        }
+      ],
+      "outputs": [],
+      "widgets_values": [
+        "video/MiniMaxH3_hybrid_ref2v_turbo",
+        "auto",
+        "auto"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "video/MiniMaxH3_hybrid_ref2v_turbo",
+        "format": "auto",
+        "codec": "auto"
+      }
+    },
+    {
+      "id": 11,
+      "type": "MarkdownNote",
+      "pos": [
+        880,
+        1260
+      ],
+      "size": [
+        1030,
+        360
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "widgets_values": [
+        "## 混合基座 + ref2v Turbo 调参版（4 步）\n\n**本工作流已配好**：`minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` + **4 步**\n\n**模型**：`minimax_h3_hybrid_fl2va_ref2va_b25-49-int8`\n（hybrid：同一份权重同时含 fl2va 首尾帧 与 ref2va 参考 两种能力）\n\n**两个 Turbo LoRA 都能用（二选一，别同时挂）**\n- `minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16` → **8 步**\n- `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16` → **4 步**（最快；低步数音轨更易失真）\n\n> ⚠ 步数必须跟着 LoRA 走：8step LoRA 配 8 步、4step LoRA 配 4 步。配错就是糊/噪。\n> 两个 LoRA 直接替换 LoraLoaderModelOnly 的 lora_name 即可，权重都是 bf16 存储，配 int8 基座正常。\n\n**采样（社区基线）**：res_multistep + simple + cfg 1 + shift 12/3（训练值，别改）\n\n**用法**\n1. `LoadImage` 换成本镜参考图（提示词里用 `<Picture 1>` 引用它）\n2. 改画幅：点节点内的分辨率选择器（竖屏 720×1280 / 横屏 1344×768）\n3. 想再提速：在 UNET→LoRA 之后再串 PathchSageAttentionKJ + MiniMaxH3MemoryEfficientSageAttentionPatch\n   （顺序必须是 模型加载器 → LoRA → Sage → 采样器；顺序错会加速失效甚至崩画面）"
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      5,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      5,
+      0,
+      8,
+      0,
+      "MODEL"
+    ],
+    [
+      3,
+      2,
+      0,
+      8,
+      3,
+      "CLIP"
+    ],
+    [
+      4,
+      3,
+      0,
+      8,
+      1,
+      "VAE"
+    ],
+    [
+      5,
+      4,
+      0,
+      8,
+      2,
+      "VAE"
+    ],
+    [
+      6,
+      6,
+      0,
+      7,
+      0,
+      "IMAGE"
+    ],
+    [
+      7,
+      7,
+      0,
+      8,
+      5,
+      "MMX_DIR_GROUP"
+    ],
+    [
+      8,
+      8,
+      0,
+      9,
+      0,
+      "IMAGE"
+    ],
+    [
+      9,
+      8,
+      1,
+      9,
+      1,
+      "AUDIO"
+    ],
+    [
+      10,
+      8,
+      2,
+      9,
+      2,
+      "FLOAT"
+    ],
+    [
+      11,
+      9,
+      0,
+      10,
+      0,
+      "VIDEO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.55,
+      "offset": [
+        900,
+        700
+      ]
+    }
+  },
+  "version": 0.4
+}
