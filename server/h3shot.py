@@ -9,6 +9,7 @@
 
 import asyncio
 import glob
+import hashlib
 import json
 import math
 import os
@@ -586,8 +587,47 @@ def _deep_replace_num(obj, old_num, new_num):
     return go(obj)
 
 
-def build_timeline_from_shots(shots, *, task_type, frame_rate=24.0, width=864, height=480,
-                              common_prompt="", continuity=False, continuity_overlap=22,
+def _model_salt(opts) -> str:
+    """模型/加速栈的指纹（写进 timeline.global.modelSalt）。
+
+    为什么需要它：官方段缓存的指纹（segment_cache._segment_identity_fingerprint）里
+    **没有基座模型、没有 LoRA** —— 只换了模型或 LoRA、其它采样参数不变时，指纹一模一样
+    → 直接命中旧缓存，复用**上一次（可能带着蒸馏 LoRA / 别的基座）**的渲染产物。
+    用户实报「把加速关掉了、还是加速」就是这种陈旧缓存命中。
+
+    把模型栈哈希写进 timeline，再由 vendor 侧读进缓存 key → 换模型/LoRA 自动失效。
+    """
+    keys = ("unet_name", "clip_name", "video_vae_name", "audio_vae_name",
+            "lora_name", "lora_strength", "speed_lora", "speed_lora_strength",
+            "attention_accel", "steps", "cfg", "sampler", "scheduler",
+            "shift_video", "shift_audio", "refine_mode", "refine_steps")
+    o = opts or {}
+    raw = "|".join("%s=%s" % (k, o.get(k)) for k in keys if o.get(k) not in (None, ""))
+    if not raw:
+        return ""
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _inject_model_salt(widget, opts) -> None:
+    """把模型栈指纹塞进 widget['timeline_data'].global.modelSalt（就地改）。"""
+    salt = _model_salt(opts)
+    if not salt:
+        return
+    try:
+        td = json.loads(str(widget.get("timeline_data") or "{}"))
+        if not isinstance(td, dict):
+            return
+        g = td.get("global")
+        if not isinstance(g, dict):
+            g = {}
+            td["global"] = g
+        g["modelSalt"] = salt
+        widget["timeline_data"] = json.dumps(td, ensure_ascii=False)
+    except Exception:  # noqa: BLE001 - 指纹注入失败不影响出片
+        pass
+
+
+def build_timeline_from_shots(shots, *, task_type, frame_rate=24.0, width=864, height=480,                              common_prompt="", continuity=False, continuity_overlap=22,
                               export_mode="all", audio_mode="generate",
                               ref_image_size="match") -> dict:
     """把逐镜数据打成官方导演台的 **v5 多段时间线**（严格复刻官方 pack.py 的 schema）。
@@ -796,6 +836,8 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             "refImageSize": opts_obj.get("ref_image_size"),
         },
     )  # 尺寸 + megapixels + 导出/音频/连续性开关一起同步进 timeline_data
+    # 模型栈指纹进 timeline（官方段缓存指纹不含基座/LoRA → 不写这个会命中旧缓存）
+    _inject_model_salt(widget, opts_obj)
     if _variant == "no_labels":
         widget = {k: v for k, v in widget.items() if not k.startswith("bd_grp_")}
 

@@ -255,6 +255,26 @@ export function createTimelinePanel(ctx) {
   if (_accelResetNote) {
     setTimeout(() => ctx.toast(`已把残留的注意力加速（${_accelResetNote}）重置为「关闭」——之前的档位会自动开它，该行为已移除；需要提速请到「⚡ 加速」页手动选`, true), 1200);
   }
+  // 一次性迁移（v1.11.29）：清掉**残留的加速/蒸馏 LoRA**（含我此前误写到节点参数里的那份）。
+  // 现象：明明没开加速、出片却还是"快而糊"——因为 localStorage 里的蒸馏 LoRA / 加速选择一直留着，
+  // 每次出片都被套上；再加上官方段缓存指纹不含 LoRA → 连旧渲染都会被复用。
+  try {
+    if (!localStorage.getItem("mrnext.tl.speed.purged")) {
+      const _sp = P.speed || {};
+      const _left = [];
+      if (_sp.lora && _sp.lora !== "(无)") { _left.push(`蒸馏LoRA「${_sp.lora}」`); _sp.lora = "(无)"; }
+      if (_sp.loraS && Number(_sp.loraS) !== 1) { _sp.loraS = 1; _left.push("蒸馏LoRA强度"); }
+      if (_sp.sage && _sp.sage !== "disabled") { _left.push(`SageAttention(${_sp.sage})`); _sp.sage = "disabled"; }
+      if (_sp.accel && _sp.accel !== "off") { _left.push(`内置加速(${_sp.accel})`); _sp.accel = "off"; }
+      if (P.model && P.model.lora && P.model.lora !== "(无)") {
+        _left.push(`模型页LoRA「${P.model.lora}」`); P.model.lora = "(无)";
+      }
+      localStorage.setItem("mrnext.tl.speed.purged", "1");
+      if (_left.length) {
+        setTimeout(() => ctx.toast(`已清掉残留的加速/蒸馏设置：${_left.join("、")}。现在出片走官方单时钟 + 官方步数（25），要提速请到「⚡ 加速」页显式选`, true), 2600);
+      }
+    }
+  } catch (_) {}
   // 1) 初始化：从 store 读初始值（避免来回切换面板反复覆盖）
   _syncPfromStore();
   // 2) 订阅：其他面板改 store → 这里 P.output.width/height 同步 + 顶部分辨率控件刷新
@@ -2325,6 +2345,7 @@ export function createTimelinePanel(ctx) {
   // 这样节点直接「队列运行」时就按这套逐镜数据生成（复刻官方导演台的逐段行为，
   // 参考图也真正带上）。以前计划里只有文本 → 节点拿不到参考图 → 人物身份乱。
   let _planTimer = null;
+  let _planLast = "";
   const persistPlan = () => {
     if (_planTimer) clearTimeout(_planTimer);
     _planTimer = setTimeout(() => {
@@ -2363,6 +2384,9 @@ export function createTimelinePanel(ctx) {
             lastFrame: isUsableRel(_img[1]) ? _img[1] : "",
           };
         });
+        const payload = JSON.stringify(enriched);
+        if (payload === _planLast) return;   // 内容没变 → 不写盘（省 IO，操作更跟手）
+        _planLast = payload;
         ctx.api.savePlan(ctx.store.get().folder || "mrboard_next", enriched).catch(() => {});
       } catch (_) { /* 自动落盘失败不影响使用 */ }
     }, 900);

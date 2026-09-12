@@ -205,6 +205,25 @@ export function createToolsPanel(ctx) {
     "复制结果"
   );
 
+  // 维护：只清**渲染缓存**（段缓存 / 采样预览 / 缩略图），不动分镜、素材、成片。
+  // 段缓存的指纹不含基座/LoRA → 换模型或 LoRA 时会命中旧渲染（"改了还是加速"的元凶之一），
+  // 所以换过模型/LoRA 后建议点一次。
+  const cacheLog = h("div", { class: "muted", style: { fontSize: 11.5, minHeight: 16 } });
+  const cleanCacheBtn = h("button", { class: "btn", style: { padding: "6px 12px" }, onclick: async () => {
+    cleanCacheBtn.disabled = true; cleanCacheBtn.textContent = "清理中…";
+    try {
+      const r = await ctx.api.cleanCaches();
+      const rm = r.removed || {};
+      cacheLog.textContent = `✓ 已清理 ${r.total || 0} 个缓存文件（段缓存 ${rm.minimax_seg_cache || 0} · 预览 ${rm.mrnext_preview || 0} · 缩略图 ${rm.mrnext_thumbs || 0}）`;
+      ctx.toast(`已清理 ${r.total || 0} 个渲染缓存文件`);
+    } catch (e) {
+      cacheLog.textContent = "✗ " + e.message;
+      ctx.toast("清理失败: " + e.message, true);
+    } finally {
+      cleanCacheBtn.disabled = false; cleanCacheBtn.textContent = "🧹 清理渲染缓存";
+    }
+  } }, "🧹 清理渲染缓存");
+
   const el = h(
     "div",
     { class: "col", style: { maxWidth: "820px" } },
@@ -228,6 +247,17 @@ export function createToolsPanel(ctx) {
       h("h3", {}, "③ 导出分镜提示词 .txt"),
       h("div", { class: "row" }, exportBtn),
       h("div", { class: "muted" }, "按当前「剧本」面板内容导出（含公共前缀，按【镜头N】分段）")
+    ),
+    h(
+      "div",
+      { class: "section" },
+      h("h3", {}, "④ 维护 · 清缓存"),
+      h("div", { class: "row" }, cleanCacheBtn),
+      h("div", { class: "muted", style: { fontSize: 11.5, lineHeight: 1.6 } },
+        "只清「段缓存 / 采样预览 / 缩略图」，**不动**分镜、素材与已出成片。",
+        h("br"),
+        "换了基座模型或 LoRA 之后建议点一次 —— 段缓存指纹不含模型/LoRA，残留会导致复用旧渲染。"),
+      cacheLog
     ),
     h(
       "div",

@@ -107,25 +107,16 @@ class MRBoardStudio:
         except Exception:  # noqa: BLE001
             pass
 
-        # 出片参数，优先级：节点 params_json > <folder>/_params.json > 内置保守默认。
-        # 为什么有文件这一层：工作流的 widgets_values 是按下标序列化的，前端版本差异会让
-        # 位置映射飘；把同一份参数落到素材目录的 _params.json 就不受前端解析影响。
+        # 出片参数：只认节点的 params_json（可见、可改、随工作流走）。
+        # ⚠ 曾经还支持 input/{folder}/_params.json 静默覆盖 —— 已**彻底移除**：
+        #   往用户目录写"自动生效"的配置会让人在毫不知情的情况下被换掉基座/LoRA/步数
+        #   （用户实报"莫名其妙的加速"就是这么来的）。
         params = {}
-        if plan_path:
-            pfile = os.path.join(os.path.dirname(plan_path), "_params.json")
-            if os.path.isfile(pfile):
-                try:
-                    with open(pfile, "r", encoding="utf-8") as fh:
-                        loaded = json.load(fh)
-                    if isinstance(loaded, dict):
-                        params = {k: v for k, v in loaded.items() if v is not None and v != ""}
-                except Exception as exc:  # noqa: BLE001
-                    print("[MRBoardStudio] _params.json 读取失败（忽略）：", exc)
         if params_json and str(params_json).strip():
             try:
                 loaded = json.loads(params_json)
                 if isinstance(loaded, dict):
-                    params.update({k: v for k, v in loaded.items() if v is not None and v != ""})
+                    params = {k: v for k, v in loaded.items() if v is not None and v != ""}
                 else:
                     print("[MRBoardStudio] params_json 不是 JSON 对象（忽略）")
             except Exception as exc:  # noqa: BLE001

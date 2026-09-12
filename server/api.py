@@ -3763,6 +3763,36 @@ async def editor_delete_materials(req):
     return _json({"removed": removed, "count": len(removed)})
 
 
+async def clean_render_caches(req):
+    """POST /mrnext/studio/clean_caches —— 只清**渲染缓存**（不动分镜/素材/成片）。
+
+    清：output/minimax_seg_cache（段缓存 —— **陈旧产物被复用的元凶**：它的指纹不含基座/LoRA，
+        换了模型或 LoRA 会命中旧渲染）、output/mrnext_preview（采样预览）、
+        output/mrnext_thumbs（缩略图）。
+    保留：output/minimax_seg_export（分段成片）、output/mrnext（成片）、
+        output/mrboard_assetgen（生成素材）—— 那些是用户产物，不是缓存。
+    """
+    import shutil as _sh
+
+    out = folder_paths.get_output_directory()
+    report = {}
+    for name in ("minimax_seg_cache", "mrnext_preview", "mrnext_thumbs"):
+        p = os.path.join(out, name)
+        if not os.path.isdir(p):
+            report[name] = 0
+            continue
+        n = sum(len(fs) for _r, _d, fs in os.walk(p))
+        try:
+            _sh.rmtree(p, ignore_errors=True)
+            os.makedirs(p, exist_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            print("[MRBoardNext] 清缓存失败", name, exc)
+        report[name] = n
+    total = sum(report.values())
+    print("[MRBoardNext] 已清理渲染缓存：%s（%d 个文件）" % (report, total))
+    return _json({"ok": True, "removed": report, "total": total})
+
+
 async def timeline_clear_cache(req):
     """POST /mrnext/timeline/clear_cache —— 时间线「🗑 清空」时顺带清掉会影响后续生成的缓存。
 
@@ -4304,6 +4334,7 @@ ROUTES = [
     ("POST", "/mrnext/studio/asset_plan", studio_asset_plan),
     ("POST", "/mrnext/studio/save_plan", studio_save_plan),
     ("GET", "/mrnext/studio/read_plan", studio_read_plan),
+    ("POST", "/mrnext/studio/clean_caches", clean_render_caches),
     ("GET", "/mrnext/assetgen/models", assetgen_models),
     ("GET", "/mrnext/assetgen/config", assetgen_config),
     ("POST", "/mrnext/assetgen/generate", assetgen_generate),

@@ -131,6 +131,13 @@ def _segment_identity_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[
         "continuity_overlap": plan.continuity_overlap_frames if plan.continuity_enabled else 0,
         "continuity_from_prev": bool(getattr(seg, "continuity_from_prev", True)),
         "continuity_pipeline": CONTINUITY_PIPELINE_ID,
+        # ⚠ 模型/LoRA 指纹（MRBoard 侧写进 timeline.global.modelSalt）。
+        # 本函数原先**没有基座模型、也没有 LoRA** —— 只换模型或 LoRA、其余采样参数不变时
+        # 指纹完全相同 → 命中旧缓存，复用上一次（可能带蒸馏 LoRA / 别的基座）的渲染产物。
+        # 用户实报「加速关掉了还是加速」即此。缺失时为空串，不影响旧行为。
+        "model_salt": str(
+            ((getattr(plan, "raw", None) or {}).get("global") or {}).get("modelSalt") or ""
+        ),
     }
 
 
