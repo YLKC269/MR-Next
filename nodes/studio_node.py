@@ -71,7 +71,10 @@ class MRBoardStudio:
                 # steps / cfg / sampler / scheduler / shift_video / shift_audio /
                 # width / height / frame_rate / seconds / ref_max_size / attention_accel /
                 # clear_vram_between_segments / export_source_images
-                "params_json": ("STRING", {"default": "", "multiline": True,
+                # ⚠ 必须 multiline=False：多行 STRING 在 ComfyUI 里是「占据节点剩余高度的
+                # 大文本框」，会把下面的 DOM 部件（整个导演台面板）挤到底部，
+                # 节点上方出现一大片空白（用户实报）。单行就只占一行。
+                "params_json": ("STRING", {"default": "", "multiline": False,
                                            "placeholder": '{"steps": 8, "unet_name": "...", "speed_lora": "..."}'}),
             },
         }
