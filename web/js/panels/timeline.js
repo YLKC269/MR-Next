@@ -320,6 +320,21 @@ export function createTimelinePanel(ctx) {
   // （被「一键流水线」面板改动 store 时，把新值刷回控件；由设置页构建时注册）
   const outFlagPainters = new Set();
   const syncOutFlagControls = () => { outFlagPainters.forEach((f) => { try { f(); } catch (_) {} }); };
+  // ---------- 实时预览：社区最省内存的那条路 ----------
+  // 官方引擎开启 liveTaePreview 后，**每个采样步**把 x0 用 TAE 小解码器（~9MB）解成小图，
+  // base64 经 websocket（minimax_director_preview）直接推过来 —— 不落盘、不轮询、
+  // 不额外占显存；比"每步写 jpg + 前端轮询"轻得多，也比 ComfyUI 自带的 latent2rgb 清楚。
+  // 本机没有 models/vae_approx/taeh3.safetensors 时引擎自动退回 latent2rgb（不报错）。
+  // 收不到推送时，出片流程里的旧轮询仍会兜底。
+  try {
+    ctx.api.listenDirectorPreview((d) => {
+      try {
+        if (!d || !d.image_b64) return;
+        livePreviewUrl = "data:image/jpeg;base64," + d.image_b64;
+        if (typeof previewPainter === "function") previewPainter();
+      } catch (_) { /* 预览失败不影响出片 */ }
+    });
+  } catch (_) {}
 
   const track = h("div", { class: "tl-track" });
   const ruler = h("div", { class: "tl-ruler" });
@@ -1831,6 +1846,19 @@ export function createTimelinePanel(ctx) {
     // 提示词净化：剥掉粘贴图片时残留的 @image#N:xxx.png 虚拟引用 token。
     // 不剥的话它会作为无意义文本混进 prompt（用户反馈「文生视频被污染」的真凶）。
     let text = stripVirtualRefs(c.prompt || sh?.text || "");
+    // ★ 绝对准确：r2v 下挂了音色、但正文里没写 <Audio N> → **自动补一行标记**。
+    //   官方只把「正文里写到的 <Audio N>」当音色参考，不写就等于挂了个寂寞
+    //   （用户长期反馈"音色参考一直不被引用"的根因之一）。
+    let _autoAudioMark = false;
+    try {
+      if (P.mode === "r2v") {
+        const _audsA = ((c.media && c.media.audio) || []).filter(Boolean).slice(0, 3);
+        if (_audsA.length && !/<\s*Audio\s*\d+\s*>/i.test(text)) {
+          text = `${text}\n音色参考：${_audsA.map((_, k) => `<Audio ${k + 1}>`).join(" ")}`;
+          _autoAudioMark = true;
+        }
+      }
+    } catch (_) { /* 补标记失败就按原样走 */ }
     // 素材前置校验：i2v/fl2v/fl2v_tail/r2v 必须有对应素材图，否则后端构图缺必需输入，出片静默失败
     // 首尾帧一族要**按槽位**判（i2v 只认「首帧」槽、fl2v_tail 只认「尾帧」槽），
     // 否则"只剩尾帧"会误判成"有图"→ 提交后才被后端 400 打回（白等一轮）。
@@ -1885,6 +1913,9 @@ export function createTimelinePanel(ctx) {
     //    所以期间的告警先收集起来，最后与「▶ 第N镜」合并成**一条**输出 —— 否则会被状态行覆盖，
     //    用户根本看不到（"标了参考不生效"的提示就白打了）。
     const _warns = [];
+    if (_autoAudioMark) {
+      _warns.push("已自动补上「音色参考：<Audio 1>」——你挂了音色但正文里没写 <Audio N>，官方只认正文里写到的标记；想自己控制措辞就在正文手动写 <Audio N>");
+    }
     // 音色参考回执：官方只在「参考生视频(R2V)」有 ref_audios.ref_audio_{N-1} 槽位。
     // 别的模式标了 <Audio N> 也发不出去 → 必须明说，否则用户以为"标了就生效"（用户实报）。
     try {

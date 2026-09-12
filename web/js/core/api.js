@@ -75,6 +75,13 @@ export const StudioAPI = {
   assetPlan: (script, prefix = "") => postJson("/mrnext/studio/asset_plan", { script, prefix }),
   savePlan: (folder, shots) => postJson("/mrnext/studio/save_plan", { folder, shots }),
   readPlan: (folder) => getJson(`/mrnext/studio/read_plan?folder=${encodeURIComponent(folder)}`),
+  // 官方引擎的「每步 TAE 实时预览」经 websocket 推送（不落盘、不轮询、不吃显存）。
+  // 返回取消订阅函数。
+  listenDirectorPreview: (fn) => {
+    const handler = (e) => { try { fn((e && e.detail) ? e.detail : e); } catch (_) {} };
+    try { api.addEventListener("minimax_director_preview", handler); } catch (_) { return () => {}; }
+    return () => { try { api.removeEventListener("minimax_director_preview", handler); } catch (_) {} };
+  },
   cleanCaches: () => postJson("/mrnext/studio/clean_caches", {}),
   models: () => getJson("/mrnext/assetgen/models"),
   assetgenConfig: (useLora, loraFolder) => {

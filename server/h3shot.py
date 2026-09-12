@@ -627,6 +627,25 @@ def _inject_model_salt(widget, opts) -> None:
         pass
 
 
+def _inject_live_preview(widget, opts) -> None:
+    """打开官方引擎的「每步 TAE 实时预览」（社区最省内存那条路）。
+
+    官方 `liveTaePreview` 开启后，每个采样步把 x0 用 **TAE 小解码器**解成小图、base64 经
+    websocket（`minimax_director_preview`）推给前端 —— **不落盘、不轮询、不额外占显存**
+    （TAE 只 ~9MB，比拉一次完整 VAE 解码便宜几个数量级）。
+    权重 `models/vae_approx/taeh3.safetensors` 缺失时引擎自动退回 Latent2RGB，不会报错。
+    `opts.live_preview = False` 可关闭。
+    """
+    try:
+        td = json.loads(str(widget.get("timeline_data") or "{}"))
+        if not isinstance(td, dict):
+            return
+        td["liveTaePreview"] = bool((opts or {}).get("live_preview", True))
+        widget["timeline_data"] = json.dumps(td, ensure_ascii=False)
+    except Exception:  # noqa: BLE001 - 预览开关写不进去不影响出片
+        pass
+
+
 def build_timeline_from_shots(shots, *, task_type, frame_rate=24.0, width=864, height=480,                              common_prompt="", continuity=False, continuity_overlap=22,
                               export_mode="all", audio_mode="generate",
                               ref_image_size="match") -> dict:
@@ -838,6 +857,8 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
     )  # 尺寸 + megapixels + 导出/音频/连续性开关一起同步进 timeline_data
     # 模型栈指纹进 timeline（官方段缓存指纹不含基座/LoRA → 不写这个会命中旧缓存）
     _inject_model_salt(widget, opts_obj)
+    # 实时预览：走官方「每步 TAE 预览」（websocket 直推、不落盘不轮询、不吃显存）
+    _inject_live_preview(widget, opts_obj)
     if _variant == "no_labels":
         widget = {k: v for k, v in widget.items() if not k.startswith("bd_grp_")}
 
@@ -935,6 +956,12 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             #   只填第 2 个音色时若不重编号，正文里的 <Audio 2> 会指向不存在的参考 → 静默不生效
             #   （用户长期反馈"音色参考一直不被引用"）。
             spr = _renum(spr, "Audio", aud_rename)
+            # ★ 绝对准确：挂了音色但正文没写 <Audio N> → 自动补一行标记。
+            #   官方只把「正文里写到的 <Audio N>」当音色参考，不写就等于挂了个寂寞
+            #   （用户长期反馈"音色参考一直不被引用"）。
+            if aud_rels and not re.search(r"<\s*Audio\s*\d+\s*>", spr, re.I):
+                spr = spr.rstrip() + "\n音色参考：" + " ".join(
+                    "<Audio %d>" % (k + 1) for k in range(len(aud_rels)))
             gi = {}
             for k, rel in enumerate(img_rels):
                 gi[f"ref_images.ref_image_{k}"] = link(add("LoadImage", {"image": rel}))
