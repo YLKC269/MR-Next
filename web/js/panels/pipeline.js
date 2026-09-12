@@ -57,11 +57,11 @@ export function createPipelinePanel(ctx) {
       audio_mode: audio.no_speech ? "mute" : "generate",                             // 完全无人声 / 正常生成
       continuity: output.continuity ? true : undefined,                              // continuityEnabled：段间重叠帧衔接
       continuity_overlap: output.continuity ? (Number(output.continuity_overlap) || 9) : undefined,
-      speed_node: speed.node && speed.node !== "off" ? speed.node : undefined,
-      speed_device: speed.dev === "auto" ? undefined : speed.dev,
       speed_lora: speed.lora && speed.lora !== "(无)" ? speed.lora : undefined,
       speed_lora_strength: speed.loraS,
       sage_attention: speed.sage && speed.sage !== "disabled" ? speed.sage : undefined,
+      // 内置注意力加速：导演台单镜出片会下发它，流水线以前漏了 → 两边行为不一致（对齐官方/导演台）
+      attention_accel: (speed.accel && speed.accel !== "off") ? speed.accel : "off",
       // 公共提示词（官方 common prompt）—— 与导演台「🌐 公共提示词」页同源
       common_prompt: (P.common && P.common.text) ? P.common.text : undefined,
       common_enabled: (P.common && P.common.enabled !== false) ? true : undefined,
@@ -81,7 +81,6 @@ export function createPipelinePanel(ctx) {
   const timelineOptsSummary = () => {
     const o = readTimelineOpts();
     const parts = [];
-    if (o.speed_node) parts.push("加速:" + o.speed_node);
     if (o.unet_name) parts.push("模型:" + String(o.unet_name).split("/").pop().slice(0, 24));
     if (o.lora_name) parts.push("LoRA:" + String(o.lora_name).split("/").pop().slice(0, 18));
     if (o.width && o.height) parts.push(o.width + "×" + o.height);

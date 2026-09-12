@@ -761,12 +761,16 @@ def build_av_prompt(*, visual="", dialogue=None, speaker_map=None,
         an = int(d.get("audio") or 0)
         vref = (" (voice reference <Audio %d>)" % an) if an > 0 else ""
         # 台词必须用 [语言] … ；绝不能用双引号（会被当成画面字幕）
+        # 台词必须用官方的 <d>…</d> 包裹：<d> / </d> 在模型侧是**真实特殊 token**
+        #   （comfy\text_encoders\minimax.py 里 id 151669/151670），官方 Prompt Guide 规定
+        #   「<d> 内只放语言标签 + 原话，身份/编号/语气/音色参考写在 <d> 外」。
+        #   不包 <d> 时模型只当成普通文本 → 口型与音色对齐都变差（本项为对齐官方导演台）。
         if d.get("inner"):
             # 生产模板规则「内心独白时嘴巴紧闭零动作」：写成独白并显式声明不张嘴，
             # 否则 H3 会让人物开口说话（口型对不上，观众一眼看出假）
-            descs.append("%s%s %s: [%s] %s" % (who, vref, INNER_MONOLOGUE_CN if l == CN else INNER_MONOLOGUE, lang, txt))
+            descs.append("%s%s %s: <d>[%s] %s</d>" % (who, vref, INNER_MONOLOGUE_CN if l == CN else INNER_MONOLOGUE, lang, txt))
         else:
-            descs.append("%s says%s: [%s] %s" % (who, vref, lang, txt))
+            descs.append("%s says%s: <d>[%s] %s</d>" % (who, vref, lang, txt))
         spoken += 1
     # 关键：一句台词都没有时必须显式声明"不要人声"，否则 H3 会自己安排人说胡话。
     # 用跟脚本同语言的最短写法：中剧写「无台词，无人声」而非一整段英文。

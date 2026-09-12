@@ -14,12 +14,11 @@
   - vendor 版已裁掉 web UI（本包自有前端）与 HTTP 路由（避免 /minimax/* 冲突）。
   - 可选外部增强（未装不影响核心功能）：
       ComfyUI-KJNodes          → PathchSageAttentionKJ（Block Sparse Attention 加速）
-      TE-speed-minimaxH3       → TESpeedMiniMaxH3（采样步数加速）
       comfyUI-llama-TE         → 本地 LLM 提示词优化（Skill 面板）
       ComfyUI-SeedVR2_VideoUpscaler → SeedVR2 视频超分（二采）
 """
 
-__version__ = "1.11.14"
+__version__ = "1.11.15"
 
 import logging
 import os

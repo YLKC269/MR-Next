@@ -32,15 +32,13 @@ _H3_PREFIX = "mrnext_h3shot"
 
 # ---------------------------------------------------------------- 外部节点接口
 # 用户可以在画布上自己接「模型节点」和「第三方加速节点」；一旦外接，本节点的内置加速
-# 必须整体让路 —— 内置 sage / TE-Speed / 加速 LoRA 都会改写模型与噪声调度，与外部加速
+# 必须整体让路 —— 内置 sage / 加速 LoRA 都会改写模型与噪声调度，与外部加速
 # 叠加会变成"双重加速"（调度被改两遍 → 画面发灰、显存反而爆）。
-_ACCEL_OPT_KEYS = ("attention_accel", "sage_attention", "sparse_attention", "speed_node", "speed_mode", "speed_lora")
+_ACCEL_OPT_KEYS = ("attention_accel", "sage_attention", "sparse_attention", "speed_lora")
 _ACCEL_OPT_LABEL = {
     "attention_accel": "内置注意力加速",
     "sage_attention": "BlockSparse/SageAttention",
     "sparse_attention": "BlockSparse/SageAttention",
-    "speed_node": "TE-Speed 加速节点",
-    "speed_mode": "TE-Speed 加速节点",
     "speed_lora": "加速 LoRA（蒸馏）",
 }
 _ACCEL_KIND_CN = {
@@ -65,7 +63,7 @@ _EXT_ACCEL_RULES = (
     ("memory", re.compile(r"block_?swap|blockswap|memory_?efficient|tile|offload", re.I)),
 )
 # 本包自己的节点与内置构件：不算"外部"（否则自己扫自己，直接误判）
-_EXT_SELF_RE = re.compile(r"MRBoard|MRNext|MiniMaxH3MemoryEfficientSageAttentionPatch|MiniMaxH3Director|^TESpeedMiniMaxH3$", re.I)
+_EXT_SELF_RE = re.compile(r"MRBoard|MRNext|MiniMaxH3MemoryEfficientSageAttentionPatch|MiniMaxH3Director", re.I)
 # 这两类虽含 sage/accelerate 字样，但属于"我们自己内置链路会用到的官方节点"，单独放行
 _EXT_ALLOW_RE = re.compile(r"^(PathchSageAttentionKJ|MiniMaxH3MemoryEfficientSageAttentionPatch)$", re.I)
 
@@ -350,7 +348,7 @@ def _loader_widgets(nodes, typ):
 
 def _base_loaders(g, seq, nodes, opts):
     """组装 UNET/CLIP/视频VAE/音频VAE 加载节点（opts 可覆盖文件名），
-    并按需串入通用 LoRA → 加速 LoRA → TESpeedMiniMaxH3 加速节点。
+    并按需串入通用 LoRA → 加速 LoRA。
 
     返回 (model_node_id, clip_id, video_vae_id, audio_vae_id)；
     model_node_id 是模型链末端（UNET→[LoRA]→[加速LoRA]→[TE-Speed]），
@@ -409,7 +407,7 @@ def _base_loaders(g, seq, nodes, opts):
                  "inputs": {"model": link(model_node), "lora_name": lora_name,
                             "strength_model": lora_strength}}
         model_node = ln
-    # 加速 LoRA（8/4 步蒸馏，可选，配合 TE-Speed 的 8-step/4-step 模式）
+    # 加速 LoRA（8/4 步蒸馏，可选）
     acc_lora = o.get("speed_lora") or ""
     if acc_lora and acc_lora != "(无)":
         acc_strength = float(o.get("speed_lora_strength") or 1.0)
@@ -418,19 +416,6 @@ def _base_loaders(g, seq, nodes, opts):
                  "inputs": {"model": link(model_node), "lora_name": acc_lora,
                             "strength_model": acc_strength}}
         model_node = al
-    # TE-Speed-MiniMaxH3 加速节点（可选；mode: standard / 4-step LoRA / 8-step LoRA）
-    speed_mode = o.get("speed_node") or o.get("speed_mode") or ""
-    if speed_mode and speed_mode != "off":
-        sd = str(seq[0]); seq[0] += 1
-        g[sd] = {"class_type": "TESpeedMiniMaxH3",
-                 "inputs": {"model": link(model_node),
-                            "processing_control_value": float(o.get("speed_control") or 0.08),
-                            "processing_percent_1": float(o.get("speed_pct1") or 0.1),
-                            "processing_percent_2": float(o.get("speed_pct2") or 0.9),
-                            "mcs": int(o.get("speed_mcs") or 2),
-                            "device": o.get("speed_device") or "auto",
-                            "mode": speed_mode}}
-        model_node = sd
     return model_node, c, vv, av
 
 
@@ -542,6 +527,12 @@ def _sync_timeline_size(widget, megapixels=None, output_flags=None):
     td["width"] = w
     td["height"] = h
     td["refMaxSize"] = r
+    # ⚠ frameRate 必须一起写进 timeline_data：官方 plan.py 优先读 td["frameRate"]，
+    #   只改 widget.frame_rate 会被模板的 24 覆盖 → 面板改 FPS 完全不生效（用户实报「调了没用」）。
+    try:
+        td["frameRate"] = float(widget.get("frame_rate") or td.get("frameRate") or 24.0)
+    except (TypeError, ValueError):
+        pass
     out = td.get("output") or {}
     if isinstance(out, dict):
         out["width"] = w
@@ -556,7 +547,9 @@ def _sync_timeline_size(widget, megapixels=None, output_flags=None):
                 pass
         # 官方导出/音频/连续性开关（以前完全没写 → 用户改「分段导出 / 静音 / 段间连续性」在官方侧不生效）
         for _k, _cast in (("exportMode", str), ("audioMode", str),
-                          ("continuityEnabled", bool), ("continuityOverlapFrames", int)):
+                          ("continuityEnabled", bool), ("continuityOverlapFrames", int),
+                          # 官方 ref_image_size（match|max）：resolve_ref_image_size 全局回退读 output.refImageSize
+                          ("refImageSize", str)):
             _v = (output_flags or {}).get(_k)
             if _v in (None, ""):
                 continue
@@ -606,8 +599,6 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
     lora_strength, width, height, ref_max_size, total_frames, frame_rate, steps, sampler,
     scheduler, shift_video, shift_audio, cfg。steps/cfg 兼容旧参数。
     加速（可选）：speed_lora/speed_lora_strength（8/4步蒸馏 LoRA，LoraLoaderModelOnly 串链），
-    speed_node=standard|4-step LoRA|8-step LoRA + speed_device(默认 auto)+speed_control/speed_pct1/
-    speed_pct2/speed_mcs → 模型链末尾插 TESpeedMiniMaxH3 加速节点。
     """
     opts_obj = dict(opts or {})
     # 公共提示词（官方 common prompt）：没显式给就从 opts 里取（导演台/流水线都塞在 opts）
@@ -712,6 +703,7 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             "audioMode": ((opts_obj.get("audio_mode") or "").lower() or None),
             "continuityEnabled": opts_obj.get("continuity"),
             "continuityOverlapFrames": opts_obj.get("continuity_overlap"),
+            "refImageSize": opts_obj.get("ref_image_size"),
         },
     )  # 尺寸 + megapixels + 导出/音频/连续性开关一起同步进 timeline_data
     if _variant == "no_labels":

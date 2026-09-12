@@ -1,11 +1,59 @@
 # MR分镜助手导演台 · Next — 安装流程与使用教程
 
-> 版本：**v1.11.14** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
+> 版本：**v1.11.15** ｜ 一句话定位：**在一个节点里跑完整条 AI 短剧流水线** —— 剧本 → 拆分分镜 → 生成设定图 → 匹配素材 → 逐镜出片 → 剪辑成片。
 >
 > 官方 MiniMax H3 出片引擎已内嵌在包内，**不需要另外安装任何节点**（VOSR2 / SeedVR2 是可选增强，装了才启用）。
 
 <details open>
-<summary><b>本次更新 · v1.11.14（点开看变化）</b></summary>
+<summary><b>本次更新 · v1.11.15（点开看变化）</b></summary>
+
+**移除 TE 加速（TE-Speed / `TESpeedMiniMaxH3`）**
+
+「⚡ 加速」页原来的 **「TE-Speed 模式」** 和 **「TE-Speed 设备」** 两个控件已整体删除，
+连带清掉了它带来的**隐藏依赖**与**画质风险**：
+
+- 节点参数不再输出 `speed_node` / `speed_device` → 构图里不会再插入 `TESpeedMiniMaxH3` 节点。
+- 「一键最佳画质」与「加速状态」总览里的 TE-Speed 项同步删除（少一个要排查的开关）。
+- 外接第三方加速节点时的「让路」白名单里也去掉了 `speed_node` / `speed_mode`。
+- **不再需要额外安装 `TE-speed-minimaxH3` 这个可选增强包**（未装也不影响任何功能）。
+
+> 说明：**移除的只是「采样步数加速」**。二采超分链路里的 `TESpeedVideoCombine`
+> （TE-Speed-FlashVSR 超分）**保持不动**，出片后二采不受影响。
+
+> 如果你之前开过 TE-Speed：它只是从设置里消失了，**不会**影响出片路径 ——
+> 现在模型链是 `UNET → [LoRA] → [蒸馏 LoRA]`，步数照旧由「步数 / 画质档位」控制。
+> 旧的本地设置里残留的 `speed.node` 键会被忽略，不需要手动清理。
+
+**对齐官方导演台：修掉 4 处「面板调了不生效 / 与官方不一致」**
+
+按官方 vendored 引擎（`vendor/ComfyUI_MiniMaxH3_Director`）+ ComfyUI 内置
+`comfy_extras/nodes_minimax_h3.py` 逐项核对后，修了这些真偏差：
+
+| 问题 | 之前 | 现在 |
+|---|---|---|
+| **面板 FPS 白调** | 只写 `widget.frame_rate`，不写 `timeline_data.frameRate`；官方 `plan.py` 优先读后者 → **恒被模板的 24 覆盖** | 两个都写，`timeline_data.frameRate` 跟随面板（实测设 30 → 写进 30.0） |
+| **段间重叠帧默认非法** | 默认 **9**，而官方合法集只有 **5/22/39/56**（`snap_context_frames`），9 会被归成 5 → 设了等于没设 | 默认改 **22**（= 官方默认），下拉只留 5/22/39/56 |
+| **「段间清显存」关不掉** | 只在 `true` 时下发；取消勾选 → 字段被删 → 官方读到模板默认 `true` | 布尔值**始终下发 true/false**，且默认对齐官方 `True` |
+| **`ref_image_size` 完全缺失** | 官方有 `match` / `max` 组合框（`max` = 参考图短边 2048，身份保真最好），本项目恒 `match` | 新增「**参考图缩放**」下拉（match/max），写进 `output.refImageSize` |
+| **流水线与单镜不一致** | 一键流水线没下发 `attention_accel` → 流水线出片时内置注意力加速恒 off | 流水线同步下发 |
+
+**台词改用官方 `<d>…</d>` 格式**
+
+`<d>` / `</d>` 在模型侧是**真实特殊 token**（`comfy/text_encoders/minimax.py` 里 id 151669/151670），
+官方 Prompt Guide 明确规定「`<d>` 内只放语言标签 + 原话，身份/编号/语气/音色参考写在 `<d>` 外」。
+之前台词没包 `<d>`，模型只当普通文本 → 口型与音色对齐都变差。现在：
+
+```
+阿明 (S1) says: <d>[Chinese] 你好，好久不见。</d>
+```
+
+音色参考 `(voice reference <Audio 1>)` 仍然保留在同一行、但在 `<d>` **之外**（既满足官方语义，
+也保住「音色参考必须绑在它配的那句台词上」这条实测结论）。
+
+</details>
+
+<details>
+<summary><b>上一版 · v1.11.14（点开看变化）</b></summary>
 
 **① 视频「好糊、不如以前清晰」—— 把吃画质的开关摆到明面上 + 一键回退**
 
@@ -16,7 +64,6 @@
 |---|---|
 | **步数 `steps`** | 节点原生默认 **25**；「画质档位」按钮会把它改成 **标准 = 12**、**草稿 = 6** ← 最容易踩的一脚 |
 | **蒸馏 LoRA** | 4/8 步蒸馏权重，本来就是给极低步数训练的，细节明显偏软 |
-| **TE-Speed** | 减步 / 跳步加速 |
 | **外接 SageAttention** | int8 量化 attention |
 | **内置注意力加速** | 同上（`sage` / `block_sparse` 都是 int8 量化） |
 | **出片后二采没开** | 二采（放大精修）能明显提清晰度，关了就少一道 |
@@ -151,7 +198,6 @@ python setup.py install            # 或 pip install --no-build-isolation .
 |---|---|
 | **步数 `steps`** | 节点原生默认 **25**。而「画质档位」按钮会把步数改成「标准 **12**」「草稿 **6**」—— 这是最容易踩的一脚 |
 | **蒸馏 LoRA `speed_lora`** | 4/8 步蒸馏权重，本来就是为极低步数训练的，细节明显偏软 |
-| **TE-Speed `speed_node`** | 减步/跳步加速 |
 | **外接 SageAttention `sage_attention`** | int8 量化 attention |
 | **内置注意力加速 `attention_accel`** | 同上（sage / block_sparse 都是 int8 量化） |
 | **出片后二采未开** | 二采（放大/精修）能明显提清晰度，关掉就少了一道 |
@@ -790,7 +836,7 @@ t_voice 22 / t_prodtpl_api 72 **全绿（0 失败）**。
 - 「🎬 时间线」→「⚡ 加速」页新增 **外部节点（模型 / 加速）** 区块：点「🔗 扫描画布外部节点」读当前画布
   - **外部模型节点**：UNETLoader / CheckpointLoader / GGUF / Nunchaku / CLIPLoader / VAELoader / LoraLoader …… 列出文件名 + 一键 **「采用」**（填进本节点「🧠 模型」页）；文件名不含 `minimax/h3` 会标 ⚠ 并二次确认（防止误用 SDXL 之类模型）
   - **第三方加速节点**：SageAttention/BlockSparse、TeaCache/缓存类、torch.compile、FlashAttention、Nunchaku/torchao 量化、分块显存优化……
-- **画布上一旦出现第三方加速节点 → 内置加速自动整体失效**（BlockSparse 归位「关闭」、TE-Speed 归位「关」、蒸馏 LoRA 归位「(无)」）。原因：两者都会改写模型与噪声调度，叠加 = 双重加速（画面发灰、显存反而爆）
+- **画布上一旦出现第三方加速节点 → 内置加速自动整体失效**（BlockSparse 归位「关闭」、蒸馏 LoRA 归位「(无)」）。原因：两者都会改写模型与噪声调度，叠加 = 双重加速（画面发灰、显存反而爆）
 - 出片回执会写明 `🔗 已检测到外部加速节点（…）→ 本节点内置加速已自动失效（原本启用：…）`，让你知道内置加速为什么没生效
 - 确实想叠加 → 勾 **「强制启用内置加速（忽略外部节点）」**，界面提示"可能重复叠加"
 - **后端双保险**：即使前端没传，构图阶段同样让路 —— 送进队列的图绝不会同时出现内置与外部加速
@@ -1042,7 +1088,7 @@ document.querySelector('[data-mrnext-version]').getAttribute('data-mrnext-versio
    - **外部模型节点**：`UNETLoader` / `CheckpointLoader(Simple)` / GGUF / Nunchaku / `CLIPLoader` / `VAELoader` / `LoraLoader` 等 → 显示它选的文件名，点 **「采用」** 直接填进本节点「🧠 模型」页
      - 文件名里没有 `minimax` / `h3` 时会加 ⚠ 并在采用前二次确认（避免误把 SDXL 之类的模型当成 H3 模型）
    - **第三方加速节点**：SageAttention / BlockSparse、TeaCache 等缓存加速、`torch.compile`、FlashAttention、Nunchaku / torchao 量化、分块显存优化……
-2. **只要画布上出现第三方加速节点，本节点的内置加速会自动整体失效**：`BlockSparse 加速` → 关闭、`TE-Speed 模式` → 关、`蒸馏 LoRA` → (无)。
+2. **只要画布上出现第三方加速节点，本节点的内置加速会自动整体失效**：`BlockSparse 加速` → 关闭、`蒸馏 LoRA` → (无)。
    原因：内置与外部加速都会改写模型 / 噪声调度，叠加就是「双重加速」——画面发灰、显存反而爆。
 3. 出片时底部日志会回执：`🔗 已检测到外部加速节点（…）→ 本节点内置加速已自动失效（原本启用：…）`，避免你疑惑"内置加速怎么没生效"。
 4. 确实想叠加 → 勾 **「强制启用内置加速（忽略外部节点）」**，界面会提示"可能与外部加速重复叠加"。

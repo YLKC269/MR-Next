@@ -35,19 +35,13 @@ const MODE_HINT = {
   fl2v_tail: "尾帧 = 本镜图[0]",
   r2v: "参考图 ≤9（音/视频槽引擎接入中）",
 };
-const SPEED_MODES = [
-  { v: "off", label: "关（不加速）" },
-  { v: "standard", label: "TE-Speed 标准" },
-  { v: "4-step LoRA", label: "4步 LoRA" },
-  { v: "8-step LoRA", label: "8步 LoRA" },
-];
 const PX = 16; // 每秒像素
 const IMG_CAP = 9;
 
 const DEFAULT_PARAMS = () => ({
   mode: "t2v",
   model: { unet: "", clip: "", vvae: "", avae: "", lora: "(无)", loraS: 1, autoUnet: true },
-  speed: { node: "off", dev: "auto", lora: "(无)", loraS: 1, sage: "disabled", free_vram: true,
+  speed: { lora: "(无)", loraS: 1, sage: "disabled", free_vram: true,
            // 内置注意力加速：off / sage / block_sparse（不需要外接节点；不可用时后端自动降级）
            accel: "off", accelInfo: null,
            // 外部节点接口：external = 画布上检测到的第三方加速类型（非空 → 内置加速自动失效）
@@ -60,17 +54,22 @@ const DEFAULT_PARAMS = () => ({
     // 高级采样（官方 bd_grp_advanced）
     steps: 25, sampler: "res_multistep", scheduler: "simple", shift_video: 12, shift_audio: 3,
     // 性能（官方 bd_grp_perf）
-    clear_vram: false, export_src: false,
+    clear_vram: true, export_src: false,   // 官方 clear_vram_between_segments 默认 True（对齐官方）
     // 导出模式：all=全部合成一条视频，segments=每镜独立导出（官方导演台同款）
     exportMode: "all",
     continuity: false,          // 官方 continuityEnabled：段间重叠帧衔接（与「衔接下镜」的提示词级衔接不同）
-    continuity_overlap: 9,      // 官方 continuityOverlapFrames（5/9/22/39/56）
+    // 官方 continuityOverlapFrames：合法集只有 5/22/39/56（snap_context_frames），官方默认 22。
+    // 旧默认 9 是非法值，会被官方归成 5（用户设了等于没设）。
+    continuity_overlap: 22,
     // 二采高清放大（官方 MiniMaxH3DirectorRefine）
     refine_mode: "off", refine_megapixels: 1.0, refine_passes: 1,
     // 一采二采方案：mode(off/auto/manual) + engine(rtx/flash/seedvr2)
     upscale_mode: "off", upscale_engine: "rtx", upscale_scale: 2,
     // 画质档位：draft(低步数·快) / standard(均衡) / final(成品·最佳)
     quality: "standard",
+    // 官方 ref_image_size 组合框（MiniMaxH3ReferenceToVideo）：match=按生成画布像素面积等比缩小（快）；
+    // max=参考图短边上限 2048（身份保真最好，但参考 token 每步都带 → 慢数倍）。官方默认 match。
+    ref_image_size: "match",
   },
   // —— 公共提示词（官方导演台 common prompt：整条时间线共用，逐镜并入）——
   common: { text: "", enabled: true },
@@ -440,7 +439,7 @@ export function createTimelinePanel(ctx) {
     if (!opts) { row.appendChild(h("span", { class: "muted" }, "加载选项…")); return row; }
     // ── 一键回到最佳画质 ──
     // 用户实报「视频好糊，没有之前清晰了，是不是加速开多了」。
-    // 吃画质的开关散在 5 处（内置注意力加速 / 外接 SageAttention / TE-Speed / 蒸馏 LoRA / 步数），
+    // 吃画质的开关散在 4 处（内置注意力加速 / 外接 SageAttention / 蒸馏 LoRA / 步数），
     // 而且都会持久化到 localStorage —— 没有一键回退就只能靠用户一个个试。
     const resetToBestQuality = () => {
       const changed = [];
@@ -451,7 +450,6 @@ export function createTimelinePanel(ctx) {
       if (Number(P.output.cfg) !== 1) { changed.push(`cfg ${P.output.cfg}→1`); P.output.cfg = 1; }
       if (P.speed.accel && P.speed.accel !== "off") { changed.push(`内置注意力加速(${P.speed.accel})→关`); P.speed.accel = "off"; }
       if (P.speed.sage && P.speed.sage !== "disabled") { changed.push(`外接 SageAttention(${P.speed.sage})→关`); P.speed.sage = "disabled"; }
-      if (P.speed.node && P.speed.node !== "off") { changed.push(`TE-Speed(${P.speed.node})→关`); P.speed.node = "off"; }
       if (P.speed.lora && P.speed.lora !== "(无)") { changed.push(`蒸馏 LoRA(${P.speed.lora})→关`); P.speed.lora = "(无)"; }
       if (String(P.output.upscale_mode || "off") === "off") { changed.push("出片后自动二采→开"); P.output.upscale_mode = "auto"; }
       P.output.quality = "final";
@@ -572,6 +570,9 @@ export function createTimelinePanel(ctx) {
       const refE = num(P.output.ref_size, "864", 64, 32);
       refE.min = 32; refE.max = 8192;
       refE.oninput = () => { P.output.ref_size = Math.max(32, Math.min(8192, Number(refE.value) || 864)); };
+      // 官方 ref_image_size（MiniMaxH3ReferenceToVideo 的组合框）：match / max
+      const refImgSizeE = sel(["match", "max"], P.output.ref_image_size || "match");
+      refImgSizeE.onchange = () => { P.output.ref_image_size = refImgSizeE.value; };
       // 官方：steps INT 1–200（默认 25）→ 用自由输入（以前是固定下拉，值不全）
       const stepsE = num(P.output.steps, "25", 64, 1);
       stepsE.min = 1; stepsE.max = 200;
@@ -638,30 +639,30 @@ export function createTimelinePanel(ctx) {
         // 一键最佳画质也放这里：用户觉得「糊」时第一反应是来画质档位，不该跑到「⚡加速」页才对
         qualWrap.appendChild(h("button", {
           class: "btn", style: { padding: "4px 9px", fontSize: 11 },
-          title: "步数 25（节点原生默认）+ 出片后自动二采 + 关掉全部加速（内置注意力加速 / 外接 SageAttention / TE-Speed / 蒸馏 LoRA）。画质最好，最慢",
+          title: "步数 25（节点原生默认）+ 出片后自动二采 + 关掉全部加速（内置注意力加速 / 外接 SageAttention / 蒸馏 LoRA）。画质最好，最慢",
           onclick: resetToBestQuality,
         }, "🧼 最佳画质"));
       };
       renderQual();
       // 官方：shift_video / shift_audio FLOAT 0.01–100（默认 12 / 3，训练值别乱动）
-      // 官方：段间连续性 continuityEnabled + continuityOverlapFrames（5/9/22/39/56）
+      // 官方：段间连续性 continuityEnabled + continuityOverlapFrames（合法集 5/22/39/56，默认 22）
       // 以前没暴露也没写进 timeline_data → 官方那套"段间重叠帧"根本没启用
       const contCk = h("input", { type: "checkbox", checked: P.output.continuity ? "checked" : null, style: { accentColor: "#ffd166" } });
       contCk.onchange = () => {
         P.output.continuity = contCk.checked;
-        if (contCk.checked && !P.output.continuity_overlap) P.output.continuity_overlap = 9;
+        if (contCk.checked && !P.output.continuity_overlap) P.output.continuity_overlap = 22;
         if (P.__syncStoreFromP) P.__syncStoreFromP();   // → store.continuity（「一键流水线」联动）
       };
       const contOvSel = h("select", { class: "select", style: { width: "auto" } },
-        ...[5, 9, 22, 39, 56].map((n) => h("option", { value: String(n), selected: Number(P.output.continuity_overlap || 9) === n ? "selected" : null }, String(n) + " 帧")));
+        ...[5, 22, 39, 56].map((n) => h("option", { value: String(n), selected: Number(P.output.continuity_overlap || 22) === n ? "selected" : null }, String(n) + " 帧")));
       contOvSel.onchange = () => {
-        P.output.continuity_overlap = Number(contOvSel.value) || 9;
+        P.output.continuity_overlap = Number(contOvSel.value) || 22;
         if (P.__syncStoreFromP) P.__syncStoreFromP();   // → store.continuityOverlap
       };
       // 被「一键流水线」改 store → 回填这两个控件
       outFlagPainters.add(() => {
         contCk.checked = !!P.output.continuity;
-        contOvSel.value = String(Number(P.output.continuity_overlap) || 9);
+        contOvSel.value = String(Number(P.output.continuity_overlap) || 22);
       });
       const sVE = num(P.output.shift_video, "12", 64, 0.1);
       sVE.min = 0.01; sVE.max = 100;
@@ -679,6 +680,7 @@ export function createTimelinePanel(ctx) {
         field("CFG 引导", cfgE, "cfg"),
         field("种子", seedE, "seed"),
         field("参考图尺寸", refE, "ref_max_size"),
+        field("参考图缩放", refImgSizeE, "ref_image_size（官方 match / max）"),
         field("视频 shift", sVE, "shift_video"),
         field("段间连续性", h("div", { class: "row", style: { gap: 6, alignItems: "center" } }, contCk,
           h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 continuityEnabled：段与段之间用重叠帧衔接（与「衔接下镜」的提示词级衔接是两回事）" }, "continuityEnabled"),
@@ -773,7 +775,6 @@ export function createTimelinePanel(ctx) {
         const on = [];
         if (P.speed.accel && P.speed.accel !== "off") on.push(`内置注意力加速＝${P.speed.accel}`);
         if (P.speed.sage && P.speed.sage !== "disabled") on.push(`外接 SageAttention＝${P.speed.sage}`);
-        if (P.speed.node && P.speed.node !== "off") on.push(`TE-Speed＝${P.speed.node}`);
         if (P.speed.lora && P.speed.lora !== "(无)") on.push(`蒸馏 LoRA＝${P.speed.lora}（强度 ${P.speed.loraS}）`);
         const st = Number(P.output.steps) || 0;
         const up = String(P.output.upscale_mode || "off") !== "off";
@@ -796,11 +797,8 @@ export function createTimelinePanel(ctx) {
       };
       paintAccelStatus();
       const bestBtn = h("button", { class: "btn btn-primary", style: { padding: "4px 10px", fontSize: 11.5 },
-        title: "一键回到最佳画质：步数 25（节点原生默认）+ 出片后自动二采 + 关掉内置注意力加速 / 外接 SageAttention / TE-Speed / 蒸馏 LoRA",
+        title: "一键回到最佳画质：步数 25（节点原生默认）+ 出片后自动二采 + 关掉内置注意力加速 / 外接 SageAttention / 蒸馏 LoRA",
         onclick: resetToBestQuality }, "🧼 一键最佳画质");
-      const speedE = sel(SPEED_MODES.map((m) => m.v), P.speed.node);
-      speedE.onchange = () => { P.speed.node = speedE.value; paintAccelStatus(); };
-      const devE = sel(["auto", "gpu", "cpu"], P.speed.dev); devE.onchange = () => { P.speed.dev = devE.value; };
       const loraPool = ["(无)"].concat((opts.loras || []).filter((n) => /(H3|h3|minimax).*(step|turbo)|(step|turbo).*(h3|H3|minimax)|Acc-8Step|Acc-4Step|8step|4step/i.test(n)));
       const accLoraE = sel(loraPool, P.speed.lora); accLoraE.onchange = () => { P.speed.lora = accLoraE.value; paintAccelStatus(); };
       const accLoraSE = num(P.speed.loraS, "1", 46, 0.1); accLoraSE.oninput = () => { P.speed.loraS = Number(accLoraSE.value) || 1; paintAccelStatus(); };
@@ -884,7 +882,7 @@ export function createTimelinePanel(ctx) {
           onchange: (e) => { P.speed.forceBuiltin = e.target.checked; renderExt(P.speed.extInfo); },
           style: { accentColor: "#ffd166" } }),
         h("span", { style: { fontSize: 11.5, color: "#bcd3ea" },
-          title: "默认：画布上出现第三方加速节点时，内置加速（BlockSparse / TE-Speed / 蒸馏 LoRA）自动失效。勾上则强制保留内置加速（可能与外部加速重复叠加）。" },
+          title: "默认：画布上出现第三方加速节点时，内置加速（BlockSparse / 蒸馏 LoRA）自动失效。勾上则强制保留内置加速（可能与外部加速重复叠加）。" },
           "强制启用内置加速（忽略外部节点）"));
       const renderExt = (info) => {
         clear(extBox);
@@ -933,10 +931,10 @@ export function createTimelinePanel(ctx) {
             if (!r || !r.ok) { ctx.toast((r && r.error) || "扫描失败", true); extLbl.textContent = ""; return; }
             P.speed.extInfo = r;
             P.speed.external = r.kinds || [];
-            const had = (P.speed.sage && P.speed.sage !== "disabled") || (P.speed.node && P.speed.node !== "off")
+            const had = (P.speed.sage && P.speed.sage !== "disabled")
               || (P.speed.lora && P.speed.lora !== "(无)");
             if ((r.kinds || []).length && !P.speed.forceBuiltin) {
-              P.speed.sage = "disabled"; P.speed.node = "off"; P.speed.lora = "(无)";
+              P.speed.sage = "disabled"; P.speed.lora = "(无)";
               ctx.toast(had ? "已外接第三方加速节点 → 内置加速已自动关闭（避免双重加速）"
                             : "已外接第三方加速节点 → 内置加速保持关闭");
             } else if (!(r.kinds || []).length) {
@@ -964,8 +962,6 @@ export function createTimelinePanel(ctx) {
           extBox),
         field("内置注意力加速", accelCell, "attention_accel"),
         field("BlockSparse 加速", sageE, "PathchSageAttentionKJ"),
-        field("TE-Speed 模式", speedE, "TESpeedMiniMaxH3"),
-        field("TE-Speed 设备", devE, "device"),
         field("蒸馏 LoRA", accLoraE, "speed_lora"),
         field("蒸馏 LoRA 强度", accLoraSE, "speed_lora_strength"),
         freeCk);
@@ -1474,19 +1470,20 @@ export function createTimelinePanel(ctx) {
       // 官方 timeline_data.output 的导出/音频/连续性开关（以前没传 → 改了也不生效）
       export_mode: P.output.exportMode === "segments" ? "segments" : "all",
       audio_mode: (P.audio && P.audio.no_speech) ? "mute" : "generate",
+      // ⚠ 布尔开关必须**始终下发 true/false**：以前只在 true 时下发，false 会被
+      //   `delete undefined` 删掉 → 官方读到模板默认值（clear_vram 模板=true）→ 取消勾选无效。
       continuity: !!(P.output && P.output.continuity),
-      continuity_overlap: P.output && P.output.continuity ? (Number(P.output.continuity_overlap) || 9) : undefined,
+      continuity_overlap: Number(P.output.continuity_overlap) || 22,
       ref_max_size: P.output.ref_size, frame_rate: P.output.fps, steps: P.output.steps,
+      ref_image_size: P.output.ref_image_size || "match",
       cfg: P.output.cfg, shift_video: P.output.shift_video, shift_audio: P.output.shift_audio,
       sampler: P.output.sampler || undefined, scheduler: P.output.scheduler || undefined,
-      clear_vram_between_segments: P.output.clear_vram || undefined,
-      export_source_images: P.output.export_src || undefined,
+      clear_vram_between_segments: !!P.output.clear_vram,
+      export_source_images: !!P.output.export_src,
       refine_mode: P.output.upscale_mode === "latent" ? "latent_upscale" : undefined,
       refine_megapixels: P.output.refine_megapixels,
       refine_passes: P.output.refine_passes,
       refine_latent_model: "minimax_h3_latent_upscaler_3d_bf16.safetensors",
-      speed_node: P.speed.node !== "off" ? P.speed.node : undefined,
-      speed_device: P.speed.dev === "auto" ? undefined : P.speed.dev,
       speed_lora: P.speed.lora && P.speed.lora !== "(无)" ? P.speed.lora : undefined,
       speed_lora_strength: P.speed.loraS,
       sage_attention: P.speed.sage !== "disabled" ? P.speed.sage : undefined,
