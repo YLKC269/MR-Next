@@ -430,6 +430,31 @@ export function createTimelinePanel(ctx) {
     out.byNum = byNum;
     return out;
   };
+  // 编号映射的**优先级修正**：① 正文标记的显式绑定（relOfTag，拖拽/手动绑）
+  //   → ② **本镜槽位**（用户在九宫格/音频格里明确放进去的素材，位置即编号）
+  //   → ③ 素材库按序号（「分镜匹配」那套语义流程）。
+  // ⚠ 旧实现只有 ① 和 ③：于是「槽里放了音色 + 正文写 <Audio 1>」会跑去素材库拿第 1 个音频，
+  //   自己放进去的那个反而被排到第 2 槽 → 模型参考的是**别的音色**
+  //   （用户实报"正文挂了标记还是没参考到音色"的真因）。
+  const withSlotPriority = (byNum, c) => {
+    const src = byNum || {};
+    const out = { image: { ...(src.image || {}) }, video: { ...(src.video || {}) }, audio: { ...(src.audio || {}) } };
+    const TAG = { image: "Picture", audio: "Audio", video: "Video" };
+    const put = (kind, arr) => {
+      (arr || []).filter(Boolean).forEach((rel, k) => {
+        const n = k + 1;
+        if (!isUsableRel(rel) && kind === "image") return;
+        try {
+          if (assetRegistry.relOfTag(`<${TAG[kind]} ${n}>`)) return;   // 显式绑定最优先，不动
+        } catch (_) { /* 取不到绑定就当没有 */ }
+        out[kind][n] = rel;
+      });
+    };
+    put("image", (c && c.media && c.media.image) || []);
+    put("audio", (c && c.media && c.media.audio) || []);
+    put("video", (c && c.media && c.media.video) || []);
+    return out;
+  };
   // 把"正文里看得见的引用"补进本镜素材槽：幂等（只加不删）、每镜只补一次。
   // 用户手动挑过的素材不会被覆盖，只是把缺的补上。
   const mergeTextRefs = (i) => {
@@ -1895,7 +1920,7 @@ export function createTimelinePanel(ctx) {
       payload.refs = imgs;
       // 官方参考槽按编号：把正文里标记的「第 N 号 → rel」一并发过去，后端放进槽 N-1
       try {
-        const _bn = refsFromText(c.prompt || (ctx.store.get().shots || [])[i]?.text || "").byNum || {};
+        const _bn = withSlotPriority(refsFromText(c.prompt || (ctx.store.get().shots || [])[i]?.text || "").byNum || {}, c);
         if (_bn.image && Object.keys(_bn.image).length) payload.refByNum = _bn.image;
         if (_bn.audio && Object.keys(_bn.audio).length) payload.audioByNum = _bn.audio;
         if (_bn.video && Object.keys(_bn.video).length) payload.videoByNum = _bn.video;
@@ -1929,7 +1954,7 @@ export function createTimelinePanel(ctx) {
         //   格子里的音频只是"没在正文标编号的额外参考"，排在编号条目之后。
         //   旧实现拿 `_au[n-1]`（本镜第 N 个格子）当判据 —— 那是另一套编号，
         //   素材库有第 3 个音频而格子只填了 2 条时会误报"不会生效"（用户实报）。
-        const _abn = (refsFromText(text).byNum || {}).audio || {};
+        const _abn = (withSlotPriority(refsFromText(text).byNum || {}, c).audio) || {};
         const _aover = _tags.filter((n) => n > 3);
         const _aunres = _tags.filter((n) => n <= 3 && !_abn[n]);
         if (_aover.length) {
@@ -1952,7 +1977,7 @@ export function createTimelinePanel(ctx) {
           _warns.push(`本镜标了 <Video ${_vtags.join("> <Video ")}> 参考视频，但当前是「${modeLabel(P.mode)}」模式 —— 官方只有「参考生视频(R2V)」支持参考视频，切到 R2V 才会生效`);
         } else {
           // 同 Audio：判据是"编号 1–3 且能解析出素材"，不是"本镜第 N 个格子"。
-          const _vbn = (refsFromText(text).byNum || {}).video || {};
+          const _vbn = (withSlotPriority(refsFromText(text).byNum || {}, c).video) || {};
           const _vover = _vtags.filter((n) => n > 3);
           const _vunres = _vtags.filter((n) => n <= 3 && !_vbn[n]);
           if (_vover.length) {
@@ -1966,7 +1991,29 @@ export function createTimelinePanel(ctx) {
       // 参考生效回执：填了格子但正文里没标编号的 → 会作为「额外参考」一起送模型（不是没用）。
       // 用户问「格子里的东西到底有没有生效」时，这一行就是答案。
       if (P.mode === "r2v") {
-        const _bn2 = (refsFromText(c.prompt || text).byNum) || {};
+        const _bn2 = withSlotPriority((refsFromText(c.prompt || text).byNum) || {}, c);
+        // ★ 正向回执：把「本镜实际接进官方槽位的东西 + 对应编号」列出来。
+        //   用户问"音色到底参考上没有"时，这一行就是确切答案（比"额外参考"之类的间接说法有用）。
+        const _wired = [];
+        const _nm = (kind) => {
+          const arr = (c.media && c.media[kind]) || [];
+          const bn = _bn2[kind] || {};
+          const rev = {};
+          for (const k of Object.keys(bn)) rev[bn[k]] = Number(k);
+          const done = new Set();
+          arr.filter(Boolean).forEach((rel, i) => {
+            const n = rev[rel] || (i + 1);
+            const tag = kind === "image" ? "Picture" : kind === "audio" ? "Audio" : "Video";
+            const base = String(rel).split(/[\\/]/).pop();
+            if (done.has(tag + n)) return;
+            done.add(tag + n);
+            _wired.push(`<${tag} ${n}> ← ${base}`);
+          });
+        };
+        _nm("image"); _nm("audio"); _nm("video");
+        if (_wired.length) {
+          _warns.push("参考已接入官方槽位：" + _wired.join("、"));
+        }
         const _extra = [];
         for (const kv of [["image", "图"], ["video", "视频"], ["audio", "音频"]]) {
           const kind = kv[0], cn = kv[1];
@@ -2406,7 +2453,7 @@ export function createTimelinePanel(ctx) {
           // 正文里的 <Picture N>/<Audio N>/<Video N> ↔ 实际文件（官方编号不变量的来源）
           let byNum = { picture: {}, audio: {}, video: {} };
           try {
-            const bn = (refsFromText(c.prompt || sh?.text || "") || {}).byNum || {};
+            const bn = withSlotPriority((refsFromText(c.prompt || sh?.text || "") || {}).byNum || {}, c);
             byNum = { picture: bn.image || {}, audio: bn.audio || {}, video: bn.video || {} };
           } catch (_) { /* 解析失败不影响落盘 */ }
           const _img = (md.image || []);
