@@ -162,13 +162,17 @@ class MiniMaxH3Director:
                     {
                         "default": "off",
                         "tooltip": (
-                            "注意力加速（可选，默认关闭，不影响出片稳定性）。\n"
-                            "off = 官方 attention（最稳）。\n"
-                            "sage = SageAttention int8（H3 官方「加速版」工作流同款）。\n"
+                            "注意力加速（可选，默认关闭）。\n"
+                            "⚠ 加速是【速度换画质】：sage / block_sparse 都是 int8 量化 attention，"
+                            "细节会略软，视频看起来更「糊」。画质优先请保持 off。\n"
+                            "off = 官方 attention（画质最好，推荐）。\n"
+                            "sage = SageAttention int8（略快，可能轻微降画质）。\n"
                             "block_sparse = 官方 Block-Sparse-Attention（需本地编译，"
                             "kernel 支持 sm_80–sm_100）。\n"
                             "所选后端不可用 / 中途抛错 → 自动降级（block_sparse→sage→off）"
-                            "并回退官方 attention，只在日志留一条告警。"
+                            "并回退官方 attention，只在日志留一条告警。\n"
+                            "想一键回到最好画质：导演台「⚙ 采样设置 → 画质档位 → 🧼 最佳画质」，"
+                            "或「⚡ 加速」页 →「🧼 一键最佳画质」。"
                         ),
                     },
                 ),

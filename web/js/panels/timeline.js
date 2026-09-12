@@ -438,6 +438,27 @@ export function createTimelinePanel(ctx) {
     const row = h("div", { class: "tl-paramrow" });
     outFlagPainters.clear();   // 页面重建 → 丢弃上一轮控件的回填器（避免 Set 无限增长 + 悬空 DOM 引用）
     if (!opts) { row.appendChild(h("span", { class: "muted" }, "加载选项…")); return row; }
+    // ── 一键回到最佳画质 ──
+    // 用户实报「视频好糊，没有之前清晰了，是不是加速开多了」。
+    // 吃画质的开关散在 5 处（内置注意力加速 / 外接 SageAttention / TE-Speed / 蒸馏 LoRA / 步数），
+    // 而且都会持久化到 localStorage —— 没有一键回退就只能靠用户一个个试。
+    const resetToBestQuality = () => {
+      const changed = [];
+      const st0 = Number(P.output.steps) || 0;
+      if (st0 !== 25) { changed.push(`步数 ${st0}→25`); P.output.steps = 25; }
+      if (String(P.output.sampler) !== "res_multistep") { changed.push("采样器 →res_multistep"); P.output.sampler = "res_multistep"; }
+      if (String(P.output.scheduler) !== "simple") { changed.push("调度器 →simple"); P.output.scheduler = "simple"; }
+      if (Number(P.output.cfg) !== 1) { changed.push(`cfg ${P.output.cfg}→1`); P.output.cfg = 1; }
+      if (P.speed.accel && P.speed.accel !== "off") { changed.push(`内置注意力加速(${P.speed.accel})→关`); P.speed.accel = "off"; }
+      if (P.speed.sage && P.speed.sage !== "disabled") { changed.push(`外接 SageAttention(${P.speed.sage})→关`); P.speed.sage = "disabled"; }
+      if (P.speed.node && P.speed.node !== "off") { changed.push(`TE-Speed(${P.speed.node})→关`); P.speed.node = "off"; }
+      if (P.speed.lora && P.speed.lora !== "(无)") { changed.push(`蒸馏 LoRA(${P.speed.lora})→关`); P.speed.lora = "(无)"; }
+      if (String(P.output.upscale_mode || "off") === "off") { changed.push("出片后自动二采→开"); P.output.upscale_mode = "auto"; }
+      P.output.quality = "final";
+      ctx.toast(changed.length ? "已切到最佳画质：" + changed.join("；") : "当前已经是最佳画质，无需改动");
+      // ⚠ 不要在按钮自己的事件派发过程中重建父容器（按钮会被摘掉）→ 下一帧再刷
+      setTimeout(() => { try { renderParam(); } catch (_) {} }, 0);
+    };
     if (key === "mode") {
       const msel = h("select", { class: "select", style: { width: "auto" } },
         ...MODES.map((m) => h("option", { value: m.v, selected: m.v === P.mode ? "selected" : null }, m.label)));
@@ -582,11 +603,11 @@ export function createTimelinePanel(ctx) {
       // 画质档位（社区实测基线：官方 res_multistep + simple + cfg=1 + shift 12/3；
       // 低步数必须配蒸馏 LoRA，且步数 <8 时音轨失真由「声音」页护栏兜底）
       const QUALITY_PRESETS = [
-        { key: "draft", label: "草稿（快）", steps: 6, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 0.75, upscale: "off",
+        { key: "draft", label: "草稿 6 步（快·最糊）", steps: 6, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 0.75, upscale: "off",
           tip: "6 步 + 蒸馏 LoRA：出图最快。低步数音轨易失真（ComfyUI 主仓 bug，需 nightly），已由「声音」页音频护栏自动兜底。Turbo LoRA 强度建议在 0.5–1.0 间扫，别盲套 alpha=8" },
-        { key: "standard", label: "标准（推荐）", steps: 12, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 1, upscale: "off",
+        { key: "standard", label: "标准 12 步", steps: 12, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 1, upscale: "off",
           tip: "官方推荐：12–20 步 + res_multistep + simple，cfg=1，shift 保持训练值 12/3。画质与音质均衡" },
-        { key: "final", label: "成品（最佳）", steps: 20, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 0, upscale: "auto",
+        { key: "final", label: "成品 20 步+二采", steps: 20, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 0, upscale: "auto",
           tip: "20 步官方标准 + 出片后自动二采高清放大。最慢，但画质/音质最好" },
       ];
       const qualWrap = h("div", { class: "row", style: { gap: 4, flexWrap: "wrap" } });
@@ -614,6 +635,12 @@ export function createTimelinePanel(ctx) {
             },
           }, q.label));
         });
+        // 一键最佳画质也放这里：用户觉得「糊」时第一反应是来画质档位，不该跑到「⚡加速」页才对
+        qualWrap.appendChild(h("button", {
+          class: "btn", style: { padding: "4px 9px", fontSize: 11 },
+          title: "步数 25（节点原生默认）+ 出片后自动二采 + 关掉全部加速（内置注意力加速 / 外接 SageAttention / TE-Speed / 蒸馏 LoRA）。画质最好，最慢",
+          onclick: resetToBestQuality,
+        }, "🧼 最佳画质"));
       };
       renderQual();
       // 官方：shift_video / shift_audio FLOAT 0.01–100（默认 12 / 3，训练值别乱动）
@@ -738,12 +765,45 @@ export function createTimelinePanel(ctx) {
           h("div", { class: "muted", style: { fontSize: 10.5, lineHeight: 1.6, opacity: 0.85 } },
             "说话人编号 (S1)/(S2) 由「公共前缀」里的角色顺序自动分配，同一角色跨镜头同号（音色不串）。台词请写成「角色名：台词」或「角色名说：台词」；无台词时会自动声明 No dialogue，防止模型乱配音。")));
     } else if (key === "speed") {
+      // ── 加速总览 + 一键回退（先定义，下面所有控件的 handler 都会调用它）──
+      // 用户实报「视频好糊，是不是加速开多了」：加速项分散在 4 个控件里，
+      // 没有总览就只能靠用户自己一个个关掉试 → 这里把「当前开着什么」直接摆出来。
+      const accelStatus = h("div", { style: { fontSize: 11.5, lineHeight: 1.7 } });
+      const paintAccelStatus = () => {
+        const on = [];
+        if (P.speed.accel && P.speed.accel !== "off") on.push(`内置注意力加速＝${P.speed.accel}`);
+        if (P.speed.sage && P.speed.sage !== "disabled") on.push(`外接 SageAttention＝${P.speed.sage}`);
+        if (P.speed.node && P.speed.node !== "off") on.push(`TE-Speed＝${P.speed.node}`);
+        if (P.speed.lora && P.speed.lora !== "(无)") on.push(`蒸馏 LoRA＝${P.speed.lora}（强度 ${P.speed.loraS}）`);
+        const st = Number(P.output.steps) || 0;
+        const up = String(P.output.upscale_mode || "off") !== "off";
+        const tips = [];
+        if (st && st < 20) tips.push(`步数只有 ${st}（节点原生默认 25，越低越糊）`);
+        // 步数 / 二采 / 画幅 无论开关状态都要报：
+        // 「糊」的三个头号嫌疑就是 步数低、没二采、分辨率低 —— 一条行里全摆出来，别让用户猜。
+        const rw = Number(P.output.width) || 0, rh = Number(P.output.height) || 0;
+        const resTxt = (rw && rh) ? `｜画幅 ${rw}×${rh}（${(rw * rh / 1048576).toFixed(2)}MP）` : "";
+        const tail = `｜步数 ${st}${up ? " · 出片后二采已开" : " · 出片后二采未开（开它能明显提清晰度）"}` + resTxt;
+        if (on.length) {
+          accelStatus.style.color = "#ffd9a8";
+          accelStatus.textContent = `⚠ 正在加速：${on.join("｜")}。这些都是「速度换画质/音质」的开关 ——`
+            + ` 视频发糊、细节少时先点下面「🧼 一键最佳画质」全关掉再对比`
+            + (tips.length ? `。另外：${tips.join("；")}。` : "。") + tail;
+        } else {
+          accelStatus.style.color = tips.length ? "#ffd9a8" : "#8ff0c0";
+          accelStatus.textContent = (tips.length ? `⚠ ${tips.join("；")}。` : "✅ 没有开任何加速（画质最好）") + tail;
+        }
+      };
+      paintAccelStatus();
+      const bestBtn = h("button", { class: "btn btn-primary", style: { padding: "4px 10px", fontSize: 11.5 },
+        title: "一键回到最佳画质：步数 25（节点原生默认）+ 出片后自动二采 + 关掉内置注意力加速 / 外接 SageAttention / TE-Speed / 蒸馏 LoRA",
+        onclick: resetToBestQuality }, "🧼 一键最佳画质");
       const speedE = sel(SPEED_MODES.map((m) => m.v), P.speed.node);
-      speedE.onchange = () => { P.speed.node = speedE.value; };
+      speedE.onchange = () => { P.speed.node = speedE.value; paintAccelStatus(); };
       const devE = sel(["auto", "gpu", "cpu"], P.speed.dev); devE.onchange = () => { P.speed.dev = devE.value; };
       const loraPool = ["(无)"].concat((opts.loras || []).filter((n) => /(H3|h3|minimax).*(step|turbo)|(step|turbo).*(h3|H3|minimax)|Acc-8Step|Acc-4Step|8step|4step/i.test(n)));
-      const accLoraE = sel(loraPool, P.speed.lora); accLoraE.onchange = () => { P.speed.lora = accLoraE.value; };
-      const accLoraSE = num(P.speed.loraS, "1", 46, 0.1); accLoraSE.oninput = () => { P.speed.loraS = Number(accLoraSE.value) || 1; };
+      const accLoraE = sel(loraPool, P.speed.lora); accLoraE.onchange = () => { P.speed.lora = accLoraE.value; paintAccelStatus(); };
+      const accLoraSE = num(P.speed.loraS, "1", 46, 0.1); accLoraSE.oninput = () => { P.speed.loraS = Number(accLoraSE.value) || 1; paintAccelStatus(); };
       // 官方 Block Sparse Attention 加速（sageattn）
       const SAGE_MODES = [
         ["disabled", "关闭"],
@@ -756,16 +816,16 @@ export function createTimelinePanel(ctx) {
         ["sageattn3_per_block_mean", "sageattn3(per-block-mean)"],
       ];
       const sageE = sel(SAGE_MODES.map((m) => m[0]), P.speed.sage || "disabled");
-      sageE.onchange = () => { P.speed.sage = sageE.value; };
+      sageE.onchange = () => { P.speed.sage = sageE.value; paintAccelStatus(); };
       // 内置注意力加速（直连本节点采样路径，不需要外接节点）
       //   off          = 官方 attention（默认，最稳）
       //   sage         = SageAttention int8（H3 官方「加速版」工作流同款）
       //   block_sparse = 官方 Block-Sparse-Attention（需本地编译；sm_80–sm_100）
       // 后端不可用/抛错 → 自动降级（block_sparse→sage→off），绝不阻断出片。
       const ACCEL_MODES = [
-        ["off", "关闭（官方 attention）"],
-        ["sage", "SageAttention（int8）"],
-        ["block_sparse", "官方 Block-Sparse-Attention"],
+        ["off", "关闭（官方 attention · 画质最好）"],
+        ["sage", "SageAttention int8（略快 · 可能轻微降画质）"],
+        ["block_sparse", "官方 Block-Sparse-Attention（需编译）"],
       ];
       const accelE = sel(ACCEL_MODES.map((m) => m[0]), P.speed.accel || "off");
       const accelNote = h("span", { class: "muted", style: { fontSize: 10.5, opacity: 0.85,
@@ -797,6 +857,7 @@ export function createTimelinePanel(ctx) {
           sageE.value = "disabled";
         }
         syncAccelNote();
+        paintAccelStatus();
       };
       syncAccelNote();
       // 探测后端可用性（纯提示；失败静默；api 可能不存在 —— 绝不能拖垮整页渲染）
@@ -890,6 +951,13 @@ export function createTimelinePanel(ctx) {
         } }, "🔗 扫描画布外部节点");
       renderExt(P.speed.extInfo);
       row.append(
+        // 加速总览 + 一键回退放最前面：用户抱怨画质时第一眼就能看到并一键关掉
+        h("div", { class: "tl-field", style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 } },
+          h("div", { class: "tl-flabel", title: "当前生效的加速项。每一项都是「速度换画质」—— 视频发糊/细节少时优先关掉它们" }, "加速状态（画质被吃掉先看这里）"),
+          accelStatus,
+          h("div", { class: "row", style: { gap: 6, flexWrap: "wrap", alignItems: "center" } },
+            bestBtn,
+            h("span", { class: "muted", style: { fontSize: 11 } }, "＝ 25 步 + 出片后二采 + 关掉全部加速"))),
         h("div", { class: "tl-field", style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 } },
           h("div", { class: "tl-flabel", title: "外部模型节点 / 第三方加速节点接口：外接后内置加速自动失效" }, "外部节点（模型 / 加速）"),
           h("div", { class: "row", style: { gap: 8, flexWrap: "wrap", alignItems: "center" } }, scanBtn, forceCk, extLbl),
@@ -1658,23 +1726,37 @@ export function createTimelinePanel(ctx) {
       if (_tags.length && P.mode !== "r2v") {
         _warns.push(`本镜标了 <Audio ${_tags.join("> <Audio ")}> 音色参考，但当前是「${modeLabel(P.mode)}」模式 —— 官方只有「参考生视频(R2V)」支持音色参考，切到 R2V 才会生效`);
       } else if (_tags.length) {
-        const _au = ((c.media && c.media.audio) || []).filter(Boolean);
-        const _miss = _tags.filter((n) => !_au[n - 1]);
-        if (_miss.length) {
-          _warns.push(`<Audio ${_miss.join("> <Audio ")}> 找不到对应音频（本镜音频槽只有 ${_au.length} 条，最多 3 条）→ 这几条音色参考不会生效；请在正文里改用 @音频名 或点音频格第 ${_miss[0]} 格上传`);
+        // ⚠ 判定基准必须和**后端一致**：h3shot._compact() 只收「1 ≤ N ≤ 音色槽上限(3)
+        //   且能解析出素材」的编号条目（编号→rel 走前端发过去的 byNum）；
+        //   格子里的音频只是"没在正文标编号的额外参考"，排在编号条目之后。
+        //   旧实现拿 `_au[n-1]`（本镜第 N 个格子）当判据 —— 那是另一套编号，
+        //   素材库有第 3 个音频而格子只填了 2 条时会误报"不会生效"（用户实报）。
+        const _abn = (refsFromText(text).byNum || {}).audio || {};
+        const _aover = _tags.filter((n) => n > 3);
+        const _aunres = _tags.filter((n) => n <= 3 && !_abn[n]);
+        if (_aover.length) {
+          _warns.push(`<Audio ${_aover.join("> <Audio ")}> 编号超出上限 —— 官方音色参考槽只有 3 个（ref_audio_0..2），编号 4 及以上会被丢弃、不会生效；请改成 1–3`);
+        }
+        if (_aunres.length) {
+          _warns.push(`<Audio ${_aunres.join("> <Audio ")}> 解析不到音频素材（既没有手动绑定，素材库里也没有第 ${_aunres[0]} 个音频）→ 这几条音色参考不会生效；请在正文里改用 @音频名，或点音频格从素材库挑一个`);
         }
       }
       // 参考视频回执：官方只在 R2V 有 ref_videos.ref_video_{k} 槽位
       const _vtags = [...new Set([...String(text).matchAll(/<\s*Video\s*(\d+)\s*>/gi)]
         .map((m) => parseInt(m[1], 10)).filter((n) => n > 0))].sort((a, b) => a - b);
       if (_vtags.length) {
-        const _vv = ((c.media && c.media.video) || []).filter(Boolean);
         if (P.mode !== "r2v") {
           _warns.push(`本镜标了 <Video ${_vtags.join("> <Video ")}> 参考视频，但当前是「${modeLabel(P.mode)}」模式 —— 官方只有「参考生视频(R2V)」支持参考视频，切到 R2V 才会生效`);
         } else {
-          const _vmiss = _vtags.filter((n) => !_vv[n - 1]);
-          if (_vmiss.length) {
-            _warns.push(`<Video ${_vmiss.join("> <Video ")}> 找不到对应视频（本镜视频槽只有 ${_vv.length} 条）→ 请在「视频」格里上传，或点该格从素材库选`);
+          // 同 Audio：判据是"编号 1–3 且能解析出素材"，不是"本镜第 N 个格子"。
+          const _vbn = (refsFromText(text).byNum || {}).video || {};
+          const _vover = _vtags.filter((n) => n > 3);
+          const _vunres = _vtags.filter((n) => n <= 3 && !_vbn[n]);
+          if (_vover.length) {
+            _warns.push(`<Video ${_vover.join("> <Video ")}> 编号超出上限 —— 官方参考视频槽只有 3 个（ref_video_0..2），编号 4 及以上会被丢弃、不会生效；请改成 1–3`);
+          }
+          if (_vunres.length) {
+            _warns.push(`<Video ${_vunres.join("> <Video ")}> 解析不到视频素材（既没有手动绑定，素材库里也没有第 ${_vunres[0]} 个视频）→ 不会生效；请在「视频」格里上传，或点该格从素材库选`);
           }
         }
       }
