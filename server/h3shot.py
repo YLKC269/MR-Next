@@ -613,14 +613,33 @@ def build_timeline_from_shots(shots, *, task_type, frame_rate=24.0, width=864, h
         except (TypeError, ValueError):
             sec = 5.0
         ln = _frame_count(sec, fps)
-        segs.append({
+        # 每镜的参考素材（面板落进计划的 media）：官方 segment 用 refs[].imageFile /
+        # refAudios[].audioFile / refVideos[].videoFile，槽位从 1 开始（↔ 提示词 <Picture N>）
+        def _slots(rels, key):
+            out = []
+            for k, rel in enumerate((rels or [])[:9]):
+                rel = str(rel or "").replace("\\", "/").strip()
+                if rel:
+                    out.append({"index": k + 1, key: rel})
+            return out
+        media = s.get("media") if isinstance(s.get("media"), dict) else {}
+        refs_img = _slots(media.get("image") or s.get("images"), "imageFile")
+        refs_aud = _slots(media.get("audio") or s.get("audios"), "audioFile")
+        refs_vid = _slots(media.get("video") or s.get("videos"), "videoFile")
+        seg = {
             "id": f"g{i}", "start": cursor, "length": ln, "frameCount": ln,
             "durationSec": sec, "prompt": pr, "negativePrompt": "",
-            "taskType": "", "refs": [], "refAudios": [], "refVideos": [],
+            "taskType": "", "refs": refs_img, "refAudios": refs_aud, "refVideos": refs_vid,
             "continuityFromPrev": bool(s.get("linkNext")),
             "refImageSize": None, "genImage": {"imageFile": ""}, "imageFile": "",
             "startImage": None, "endImage": None,
-        })
+        }
+        # 首尾帧模式：startImage/endImage 与官方一致（{imageFile} 或 None）
+        if s.get("firstFrame"):
+            seg["startImage"] = {"imageFile": str(s["firstFrame"]).replace("\\", "/")}
+        if s.get("lastFrame"):
+            seg["endImage"] = {"imageFile": str(s["lastFrame"]).replace("\\", "/")}
+        segs.append(seg)
         cursor += ln
     if not segs:
         segs = [{"id": "g0", "start": 0, "length": 124, "frameCount": 124,
@@ -751,7 +770,7 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             pass
     # ★ 多段模式（shots 传入时）：复刻官方导演台 —— 每个分镜一个 segment，
     #   各自带 prompt/帧数/连续性，官方节点逐段生成 + 拼音轨。
-    if shots and mode not in _GROUP_MODES:
+    if shots and mode in ("t2v", "r2v"):
         _wv_t = list(director.get("widgets_values") or [])
         _td_multi = build_timeline_from_shots(
             shots, task_type=str((_wv_t[0] if _wv_t else "") or ""),
@@ -824,6 +843,70 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
         li_last = load_image(last_frame) if last_frame else None
     else:
         li_last = None
+
+    if shots and mode == "r2v":
+        # ★ 复刻官方导演台：**每镜一个参考组**（官方 GroupsCombine 最多 5 组 → 取前 5 镜）。
+        #   官方不变量：段 ↔ 组按顺序对应；组内 `<Picture N>` ↔ 第 N 个非空 ref_image_{k} 槽。
+        #   所以这里按「正文里的编号升序」排槽，并把标记重编号成连续，避免跳号导致参考失效。
+        def _renum(text, tag, rename):
+            if not rename or not text:
+                return text
+            pat = re.compile(r"<\s*%s\s*(\d+)\s*>" % tag, re.IGNORECASE)
+            out = pat.sub(lambda m: ("\x00%s%d\x00" % (tag, rename[int(m.group(1))]))
+                          if int(m.group(1)) in rename else m.group(0), text)
+            return re.sub(r"\x00(%s)(\d+)\x00" % tag, r"<\1 \2>", out)
+        _groups = []
+        for s in list(shots)[:5]:
+            if not isinstance(s, dict):
+                continue
+            spr = str(s.get("prompt") or s.get("text") or "").strip()
+            if not spr:
+                continue
+            bn = s.get("refByNum") if isinstance(s.get("refByNum"), dict) else {}
+            pic = bn.get("picture") if isinstance(bn.get("picture"), dict) else {}
+            numbered = []
+            for k, v in (pic or {}).items():
+                try:
+                    numbered.append((int(k), str(v or "").replace("\\", "/").strip()))
+                except (TypeError, ValueError):
+                    continue
+            numbered = [(n, rel) for n, rel in sorted(numbered) if rel]
+            extras = [str(x).replace("\\", "/").strip()
+                      for x in ((s.get("media") or {}).get("image") or []) if x]
+            rels, rename = [], {}
+            for n, rel in numbered:
+                if rel not in rels:
+                    rename[n] = len(rels) + 1
+                    rels.append(rel)
+            for rel in extras:
+                if rel and rel not in rels and len(rels) < 9:
+                    rels.append(rel)
+            spr = _renum(_renum(spr, "Picture", rename), "Image", rename)
+            gi = {}
+            for k, rel in enumerate(rels[:9]):
+                gi[f"ref_images.ref_image_{k}"] = link(add("LoadImage", {"image": rel}))
+            for k, rel in enumerate([str(x).replace("\\", "/").strip()
+                                     for x in ((s.get("media") or {}).get("audio") or []) if x][:3]):
+                gi[f"ref_audios.ref_audio_{k}"] = link(add("LoadAudio", {"audio": rel}))
+            gi["prompt"] = spr
+            try:
+                gi["duration_sec"] = float(s.get("sec") or 5.0)
+            except (TypeError, ValueError):
+                gi["duration_sec"] = 5.0
+            _groups.append(add("MiniMaxH3DirectorGroupReferenceToVideo", gi))
+        if _groups:
+            _sync_common_prompt(widget, common_prompt, common_enabled)
+            comb = add("MiniMaxH3DirectorGroupsCombine",
+                       {f"groups.group_{k}": link(gr) for k, gr in enumerate(_groups)})
+            d_ins = {"model": link(u), "video_vae": link(vv), "audio_vae": link(av), "clip": link(c)}
+            d_ins["r2v_groups"] = link(comb)
+            d_ins.update(widget)
+            maybe_refine(d_ins, u)
+            dd = add("MiniMaxH3Director", d_ins)
+            if _variant == "no_video":
+                return g
+            tail(dd)
+            return g
 
     if mode == "r2v":
         # 官方参考槽（vendor/lib/ref_images.py tooltip 原文：ref_image_{k} ↔ <Picture {k+1}>）是

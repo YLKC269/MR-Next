@@ -142,13 +142,25 @@ class MRBoardStudio:
                 #     → N 个角色挤进同一段互相污染 = 用户看到的"人物乱入"。
                 texts = [str(s.get("prompt") or s.get("text") or "").strip() for s in shots]
                 if any(texts):
+                    # 有参考图 → 走 r2v（每镜一个官方参考组，人物/场景按参考锁定）；
+                    # 纯文字 → t2v。两种都是「官方多段时间线」，逐段生成。
+                    _has_ref = False
+                    for s in shots:
+                        if not isinstance(s, dict):
+                            continue
+                        _bn = s.get("refByNum") if isinstance(s.get("refByNum"), dict) else {}
+                        _md = s.get("media") if isinstance(s.get("media"), dict) else {}
+                        if (_bn.get("picture") or _md.get("image")):
+                            _has_ref = True
+                            break
+                    _mode = "r2v" if _has_ref else "t2v"
                     # 默认按官方值（25 步 / 864×480）；params_json 或 _params.json 可覆盖。
                     opts = {"width": 864, "height": 480, "steps": 25,
                             "sampler": "res_multistep", "scheduler": "simple"}
                     opts.update({k: v for k, v in params.items()
                                  if k not in ("mode", "seconds", "frame_rate")})
                     graph = _h3.build_shot_graph(
-                        "t2v", "", seed=int(seed) if seed else 0, shots=shots,
+                        _mode, "", seed=int(seed) if seed else 0, shots=shots,
                         frame_rate=float(params.get("frame_rate") or 24.0),
                         opts=opts)
                     sv_ids = [nid for nid, n in graph.items() if n.get("class_type") == "SaveVideo"]

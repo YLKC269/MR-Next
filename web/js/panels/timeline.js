@@ -2320,6 +2320,54 @@ export function createTimelinePanel(ctx) {
   }, "☑ 全选");
 
   // ---------- 渲染 ----------
+  // ---------- 计划自动落盘（防抖）----------
+  // 把「逐镜 + 每镜已选素材 + <Picture N> 编号映射 + 时长/衔接」写进 _plan.json，
+  // 这样节点直接「队列运行」时就按这套逐镜数据生成（复刻官方导演台的逐段行为，
+  // 参考图也真正带上）。以前计划里只有文本 → 节点拿不到参考图 → 人物身份乱。
+  let _planTimer = null;
+  const persistPlan = () => {
+    if (_planTimer) clearTimeout(_planTimer);
+    _planTimer = setTimeout(() => {
+      try {
+        const shots = ctx.store.get().shots || [];
+        const refMap = ctx.store.get().refMap || [];
+        const enriched = shots.map((sh, i) => {
+          const c = shot(i);
+          const md = (c && c.media) || {};
+          // 参考图：九宫格手动选的优先；为空且未手动清过 → 回退分镜匹配缓存（与出片一致）
+          let imgs = (md.image ? md.image.slice() : []);
+          if (!imgs.length && !c.refsCleared) {
+            imgs = ((refMap[i] || []).filter((m) => m.rel && m.kind === "image").map((m) => m.rel));
+          }
+          imgs = imgs.filter((x) => isUsableRel(x));
+          // 正文里的 <Picture N>/<Audio N>/<Video N> ↔ 实际文件（官方编号不变量的来源）
+          let byNum = { picture: {}, audio: {}, video: {} };
+          try {
+            const bn = (refsFromText(c.prompt || sh?.text || "") || {}).byNum || {};
+            byNum = { picture: bn.image || {}, audio: bn.audio || {}, video: bn.video || {} };
+          } catch (_) { /* 解析失败不影响落盘 */ }
+          const _img = (md.image || []);
+          return {
+            index: sh.index,
+            text: sh.text,
+            prompt: stripVirtualRefs(c.prompt || sh?.prompt || sh?.text || ""),
+            sec: effSec(i),
+            linkNext: !!c.linkNext,
+            media: {
+              image: imgs,
+              audio: (md.audio || []).filter(Boolean),
+              video: (md.video || []).filter(Boolean),
+            },
+            refByNum: byNum,
+            firstFrame: isUsableRel(_img[0]) ? _img[0] : "",
+            lastFrame: isUsableRel(_img[1]) ? _img[1] : "",
+          };
+        });
+        ctx.api.savePlan(ctx.store.get().folder || "mrboard_next", enriched).catch(() => {});
+      } catch (_) { /* 自动落盘失败不影响使用 */ }
+    }, 900);
+  };
+
   const renderTrack = () => {
     const shots = ctx.store.get().shots || [];
     clear(ruler); clear(track);
@@ -2432,7 +2480,7 @@ export function createTimelinePanel(ctx) {
     // 与二采提示（静态文案会与下拉值脱节）都必须每次渲染都刷一遍
     try { refreshExportModeBtn(); } catch (_) {}
     try { syncUpHint(); } catch (_) {}
-    syncPlanStamp(); renderTrack(); renderEditor();
+    syncPlanStamp(); renderTrack(); renderEditor(); persistPlan();
   };
   const toggleLog = () => {
     logOpen = !logOpen;
