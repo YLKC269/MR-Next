@@ -249,6 +249,23 @@ export function createTimelinePanel(ctx) {
       localStorage.setItem("mrnext.tl.outflags.migrated", "1");
     }
   } catch (_) {}
+  // 一次性迁移：v1.11.18–21 的画质档位会**自动**把加速设成 sage（该行为已移除）。
+  // 存量 localStorage 里因此残留 accel=sage，而加速路径一旦与当前 ComfyUI/量化模型
+  // 不兼容，就是「每次出片都崩、且报错不提加速」。这里把它清回 off 一次，
+  // 让用户从「明确没开加速」的干净状态开始；想开可去「⚡ 加速」页自己选。
+  let _accelResetNote = "";
+  try {
+    if (!localStorage.getItem("mrnext.tl.accel.migrated")) {
+      if (P.speed.accel && P.speed.accel !== "off") {
+        _accelResetNote = P.speed.accel;
+        P.speed.accel = "off";
+      }
+      localStorage.setItem("mrnext.tl.accel.migrated", "1");
+    }
+  } catch (_) {}
+  if (_accelResetNote) {
+    setTimeout(() => ctx.toast(`已把残留的注意力加速（${_accelResetNote}）重置为「关闭」——之前的档位会自动开它，该行为已移除；需要提速请到「⚡ 加速」页手动选`, true), 1200);
+  }
   // 1) 初始化：从 store 读初始值（避免来回切换面板反复覆盖）
   _syncPfromStore();
   // 2) 订阅：其他面板改 store → 这里 P.output.width/height 同步 + 顶部分辨率控件刷新
@@ -2519,6 +2536,31 @@ export function createTimelinePanel(ctx) {
       ctx.toast("模型选项加载失败：后端 /mrnext/editor/options 出错（" + (optRes.reason && optRes.reason.message || "") + "）", true);
     }
     if (favRes.status !== "fulfilled") console.error("[MRBoardNext] loadFavs failed", favRes.reason);
+    // 自愈：把持久化里「已不在当前选项列表」的模型选择清掉，再从默认值补齐。
+    // 动机：选项列表本身会变（v1.11.20 起音频/视频 VAE 互斥、LoRA 过滤掉非 H3 家族），
+    // 而 localStorage 里的旧选择仍会被 collectOpts 原样发进出片请求 → 用错文件
+    // → 采样期维度类报错（报错信息不提是哪个文件）。清掉后走默认值，绝不会用错。
+    const _healed = [];
+    if (opts) {
+      const _drop = (key, list, label) => {
+        const cur = P.model[key];
+        if (cur && !(list || []).includes(cur)) { _healed.push(`${label}「${cur}」`); P.model[key] = ""; }
+      };
+      _drop("unet", opts.unets, "UNet");
+      _drop("clip", opts.clips, "CLIP");
+      _drop("vvae", opts.videoVaes, "视频VAE");
+      _drop("avae", opts.audioVaes, "音频VAE");
+      if (P.model.lora && P.model.lora !== "(无)" && !(opts.loras || []).includes(P.model.lora)) {
+        _healed.push(`LoRA「${P.model.lora}」`); P.model.lora = "(无)";
+      }
+      if (P.speed.lora && P.speed.lora !== "(无)" && !(opts.loras || []).includes(P.speed.lora)) {
+        _healed.push(`蒸馏LoRA「${P.speed.lora}」`); P.speed.lora = "(无)";
+      }
+    }
+    if (_healed.length) {
+      console.warn("[MRBoardNext] 已重置失效的模型选择：", _healed.join("、"));
+      ctx.toast("检测到失效选择（已不在当前模型列表）并已重置：" + _healed.join("、"), true);
+    }
     // 打开即用：模型字段为空时自动选中本机推荐默认模型（不覆盖用户已选）
     if (opts && opts.defaults) {
       const d = opts.defaults;
