@@ -195,54 +195,62 @@ def sample_single_stage(
     #     **立刻回退官方单时钟并告警 —— 绝不抛错阻断出片**。
     sampler_obj = None
     if bool(dual_clock):
-        from .dual_clock_sampling import (
-            NATIVE_FLOW_SCHEDULER,
-            build_dual_clock_sampler,
-            install_dual_clock_model_sampling,
-            make_scheduler_sigmas,
-            model_uses_raw_audio_velocity,
-        )
-
-        split = _dual_clock_latent_shape(latent, model)
-        if split is None:
-            log.warning("T8 双时钟不可用 → 本次采样回退官方单时钟（不影响出片）")
-        else:
-            video_values, packed_values = split
-            model_use = install_dual_clock_model_sampling(model, shift_video, shift_audio)
-
-            # 步数：视频按 steps；音频若显式给了 steps_audio 就用自己的序列，
-            # 否则把视频 sigmas 换算到音频时钟跟随（仍比官方骑乘更"自己的时钟"）。
-            audio_sigmas = None
-            if sigmas is not None:
-                # 外部传了显式 sigmas（如二次采样）→ 视频用它；音频按时钟换算。
-                sigma_t = sigmas.detach().float().cpu().reshape(-1) if torch.is_tensor(sigmas) \
-                    else torch.tensor([float(x) for x in sigmas], dtype=torch.float32)
-                from .dual_clock_sampling import time_shift_sigma
-
-                audio_sigmas = time_shift_sigma(sigma_t, float(shift_video), float(shift_audio))
-            elif int(steps_audio) > 0 and int(steps_audio) != int(steps):
-                from .dual_clock_sampling import audio_steps_to_sigmas
-
-                # 音频独立步数：视频 sigmas 仍是 steps 步，音频走自己的 steps_audio 步。
-                sigma_out = BasicScheduler.execute(
-                    model_use, str(scheduler), int(steps), max(0.0, min(1.0, float(denoise)))
-                )
-                sigma_t = _unpack_node_output(sigma_out)[0]
-                audio_sigmas = audio_steps_to_sigmas(int(steps_audio), shift_video, shift_audio)
-            else:
-                sigma_out = BasicScheduler.execute(
-                    model_use, str(scheduler), int(steps), max(0.0, min(1.0, float(denoise)))
-                )
-                sigma_t = _unpack_node_output(sigma_out)[0]
-
-            sampler_obj = build_dual_clock_sampler(
-                video_values=video_values,
-                packed_values=packed_values,
-                shift_video=float(shift_video),
-                shift_audio=float(shift_audio),
-                audio_step_sigmas=audio_sigmas,
-                audio_velocity_is_raw=model_uses_raw_audio_velocity(model),
+        # 双时钟是实验分支：构建期任何异常（ModelSamplingAV 缺失、import 失败、
+        # latent 切分解不出、BasicScheduler 抛错、audio_steps 算 sigmas 失败…）
+        # 都必须回退官方单时钟，**绝不阻断一整镜出片**。sampler_obj 保持 None
+        # → 走下方 if sampler_obj is None 的官方路径。
+        try:
+            from .dual_clock_sampling import (
+                NATIVE_FLOW_SCHEDULER,
+                build_dual_clock_sampler,
+                install_dual_clock_model_sampling,
+                make_scheduler_sigmas,
+                model_uses_raw_audio_velocity,
             )
+
+            split = _dual_clock_latent_shape(latent, model)
+            if split is None:
+                log.warning("T8 双时钟不可用 → 本次采样回退官方单时钟（不影响出片）")
+            else:
+                video_values, packed_values = split
+                model_use = install_dual_clock_model_sampling(model, shift_video, shift_audio)
+
+                # 步数：视频按 steps；音频若显式给了 steps_audio 就用自己的序列，
+                # 否则把视频 sigmas 换算到音频时钟跟随（仍比官方骑乘更"自己的时钟"）。
+                audio_sigmas = None
+                if sigmas is not None:
+                    # 外部传了显式 sigmas（如二次采样）→ 视频用它；音频按时钟换算。
+                    sigma_t = sigmas.detach().float().cpu().reshape(-1) if torch.is_tensor(sigmas) \
+                        else torch.tensor([float(x) for x in sigmas], dtype=torch.float32)
+                    from .dual_clock_sampling import time_shift_sigma
+
+                    audio_sigmas = time_shift_sigma(sigma_t, float(shift_video), float(shift_audio))
+                elif int(steps_audio) > 0 and int(steps_audio) != int(steps):
+                    from .dual_clock_sampling import audio_steps_to_sigmas
+
+                    # 音频独立步数：视频 sigmas 仍是 steps 步，音频走自己的 steps_audio 步。
+                    sigma_out = BasicScheduler.execute(
+                        model_use, str(scheduler), int(steps), max(0.0, min(1.0, float(denoise)))
+                    )
+                    sigma_t = _unpack_node_output(sigma_out)[0]
+                    audio_sigmas = audio_steps_to_sigmas(int(steps_audio), shift_video, shift_audio)
+                else:
+                    sigma_out = BasicScheduler.execute(
+                        model_use, str(scheduler), int(steps), max(0.0, min(1.0, float(denoise)))
+                    )
+                    sigma_t = _unpack_node_output(sigma_out)[0]
+
+                sampler_obj = build_dual_clock_sampler(
+                    video_values=video_values,
+                    packed_values=packed_values,
+                    shift_video=float(shift_video),
+                    shift_audio=float(shift_audio),
+                    audio_step_sigmas=audio_sigmas,
+                    audio_velocity_is_raw=model_uses_raw_audio_velocity(model),
+                )
+        except Exception as exc:  # noqa: BLE001 - 双时钟失败必须回退，绝不阻断出片
+            log.warning("T8 双时钟装配失败（%s）→ 本次采样回退官方单时钟（不影响出片）", exc)
+            sampler_obj = None
 
     if sampler_obj is None:
         # ── 官方单时钟（默认 / 双时钟不可用时的回退）──

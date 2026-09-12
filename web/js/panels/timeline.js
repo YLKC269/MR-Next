@@ -266,7 +266,10 @@ export function createTimelinePanel(ctx) {
 
   const track = h("div", { class: "tl-track" });
   const ruler = h("div", { class: "tl-ruler" });
-  const scroll = h("div", { class: "tl-scroll" }, ruler, track);
+  // 轨道滚动容器：强制 width:100% —— 不限宽的话 .tl-scroll（flex:0 0 auto）会被
+  // 轨道内容撑开，分镜越多面板越宽，编辑区/实时预览被挤到可视区外。限宽后
+  // overflow-x:auto 生效，轨道在固定宽度内横向滚动，下方编辑区布局不再随分镜数漂移。
+  const scroll = h("div", { class: "tl-scroll", style: { width: "100%", minWidth: 0 } }, ruler, track);
   const tabBar = h("div", { class: "tl-tabs" });
   const paramRow = h("div", { class: "tl-parambox" });
   const editorHost = h("div", { class: "col", style: { flex: "0 0 auto" } });
@@ -625,7 +628,7 @@ export function createTimelinePanel(ctx) {
         if (stepsWarnPainter) stepsWarnPainter();
       };
       const dcWrap = h("div", { class: "row", style: { gap: 6, alignItems: "center" } }, dcCk,
-        h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 dual_clock + steps_audio：音频独立时钟独立步数。社区低步数提速方案 —— 视频压到 4/6 步时音频仍可跑 8–12 步，避免爆音/杂音" }, "音频独立步数"),
+        h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 dual_clock + steps_audio：音频独立时钟独立步数。社区低步数提速方案 —— 视频压到 4/6 步时音频仍可跑 8–12 步，避免爆音/杂音；本机/本模型不支持时静默回退官方单时钟（出片不会失败）" }, "音频独立步数"),
         dcStepsE);
       // 采样方案按钮组（采样器+调度器组合预设，一键切换）
       const SAMPLE_PRESETS = [
@@ -655,11 +658,11 @@ export function createTimelinePanel(ctx) {
       // 预览 = SageAttention + 蒸馏 LoRA 低步数 + 双时钟（音频独立步数防失真）；
       // 成片 = SageAttention + 16–20 步原生采样（社区实测 >24 步收益极低）+ 二采。
       const QUALITY_PRESETS = [
-        { key: "draft", label: "草稿 6 步·Turbo+双时钟（预览）", steps: 6, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 1.0, upscale: "off", dual: 10,
+        { key: "draft", label: "⚡ 草稿 6步", steps: 6, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, turboS: 1.0, upscale: "off", dual: 10,
           tip: "社区预览方案：SageAttention + 蒸馏 LoRA 6 步 + T8 双时钟（音频独立 10 步，防低步数爆音）。最快，只用于验证构图/动作/台词。若人声仍有电流噪，可把「音频 shift」试 6（Turbo 社区值）" },
-        { key: "standard", label: "标准 16 步（均衡）", steps: 16, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "off", dual: 0,
+        { key: "standard", label: "⚖ 标准 16步", steps: 16, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "off", dual: 0,
           tip: "社区基线：res_multistep + simple + cfg=1。实测低于 ~15 步画质明显下降，16 步是画质/速度均衡点" },
-        { key: "final", label: "成品 20 步+二采（最佳）", steps: 20, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "auto", dual: 0,
+        { key: "final", label: "✨ 成品 20步", steps: 20, sampler: "res_multistep", scheduler: "simple", cfg: 1, sv: 12, sa: 3, upscale: "auto", dual: 0,
           tip: "社区成片方案：20 步生产基线（>24 收益极低）+ 出片后自动二采高清放大。最慢，但画质/音质最好" },
       ];
       const qualWrap = h("div", { class: "row", style: { gap: 4, flexWrap: "wrap" } });
@@ -738,24 +741,45 @@ export function createTimelinePanel(ctx) {
       const ck = (val, fn, label, official) => h("label", { class: "row", style: { gap: 5, cursor: "pointer", padding: "4px 6px" } },
         h("input", { type: "checkbox", checked: val ? "checked" : null, onchange: (e) => fn(e.target.checked), style: { accentColor: "#ffd166" } }),
         h("span", { style: { fontSize: 11.5, color: "#bcd3ea" }, title: official || "" }, label));
+      // 采样设置页排版：以前 15 个字段平铺在 auto-fill 网格里 → 宽容器下大片留白、
+      // 画质档位按钮被挤成竖排。现在分成 3 个视觉子组（全宽横条），每组内部自带网格，
+      // 画质档位拿最宽的一格保证按钮横排。
+      const subSection = (title, ...kids) => h("div", { style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 5, padding: "5px 8px 7px", border: "1px solid rgba(120,170,255,.1)", borderRadius: 6, background: "rgba(8,16,32,.35)" } },
+        h("div", { class: "muted", style: { fontSize: 10, fontWeight: 600, color: "#6f88a8", letterSpacing: ".4px" } }, title),
+        ...kids);
       row.append(
-        field("步数", stepsE, "steps (1-200)"),
-        field("画质档位", qualWrap, "社区两套方案：预览（6 步+Turbo+双时钟）/ 标准 16 步 / 成品 20 步+二采"),
-        field("双时钟·音频步数", dcWrap, "dual_clock / steps_audio：视频低步数提速时音频独立推进，防爆音"),
-        field("采样方案", presetWrap, "采样器+调度器组合预设（点击切换）"),
-        field("采样器", samplerE, "sampler"),
-        field("调度器", schedE, "scheduler"),
-        field("CFG 引导", cfgE, "cfg"),
-        field("种子", seedE, "seed"),
-        field("参考图尺寸", refE, "ref_max_size"),
-        field("参考图缩放", refImgSizeE, "ref_image_size（官方 match / max）"),
-        field("视频 shift", sVE, "shift_video"),
-        field("段间连续性", h("div", { class: "row", style: { gap: 6, alignItems: "center" } }, contCk,
-          h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 continuityEnabled：段与段之间用重叠帧衔接（与「衔接下镜」的提示词级衔接是两回事）" }, "continuityEnabled"),
-          contOvSel), "continuityEnabled / continuityOverlapFrames"),
-        field("音频 shift", sAE, "shift_audio"),
-        ck(P.output.clear_vram, (v) => { P.output.clear_vram = v; }, "段间清显存", "clear_vram_between_segments"),
-        ck(P.output.export_src, (v) => { P.output.export_src = v; }, "导出源图", "export_source_images"));
+        // —— 子组 1：采样核心（步数 · 画质档位 · 双时钟）——
+        subSection("采样核心",
+          h("div", { style: { display: "grid", gridTemplateColumns: "minmax(80px, 1fr) minmax(220px, 2.5fr) minmax(140px, 1.1fr)", gap: 8, alignItems: "start" } },
+            field("步数", stepsE, "steps (1-200)"),
+            field("画质档位", qualWrap, "社区两套方案：预览（6 步+Turbo+双时钟）/ 标准 16 步 / 成品 20 步+二采"),
+            field("双时钟·音频步数", dcWrap, "dual_clock / steps_audio：视频低步数提速时音频独立推进，防爆音；不支持时自动回退单时钟"))),
+        // —— 子组 2：采样器与引导 —— 六个小输入一排
+        subSection("采样器与引导",
+          h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(118px, 1fr))", gap: 6 } },
+            field("采样器", samplerE, "sampler"),
+            field("调度器", schedE, "scheduler"),
+            field("CFG 引导", cfgE, "cfg"),
+            field("种子", seedE, "seed"),
+            field("视频 shift", sVE, "shift_video"),
+            field("音频 shift", sAE, "shift_audio"))),
+        // —— 子组 3：采样方案 · 参考 · 段间 ——
+        subSection("采样方案 · 参考 · 段间",
+          h("div", { style: { display: "flex", flexDirection: "column", gap: 7 } },
+            field("采样方案", presetWrap, "采样器+调度器组合预设（点击切换）"),
+            h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(126px, 1fr))", gap: 6 } },
+              field("参考图尺寸", refE, "ref_max_size"),
+              field("参考图缩放", refImgSizeE, "ref_image_size（官方 match / max）"),
+              h("div", { style: { gridColumn: "span 2", minWidth: 0, display: "flex", flexDirection: "column", gap: 3 } },
+                h("div", { class: "tl-flabel", title: "官方 continuityEnabled：段与段之间用重叠帧衔接（与「衔接下镜」的提示词级衔接是两回事）" }, "段间连续性"),
+                h("div", { class: "row", style: { gap: 6 } }, contCk,
+                  h("span", { class: "muted", style: { fontSize: 10.5 }, title: "官方 continuityEnabled：段与段之间用重叠帧衔接" }, "continuityEnabled"),
+                  contOvSel)),
+              h("div", { style: { gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 3 } },
+                h("div", { class: "tl-flabel" }, "导出与显存"),
+                h("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } },
+                  ck(P.output.clear_vram, (v) => { P.output.clear_vram = v; }, "段间清显存", "clear_vram_between_segments"),
+                  ck(P.output.export_src, (v) => { P.output.export_src = v; }, "导出源图", "export_source_images"))))));
     } else if (key === "audio") {
       // —— 声音 / 台词：H3 官方三段式提示词（治「说话乱说 / 语音乱码」）——
       // H3 音视频联合生成：只给画面描述、不写声音字段 → 模型自行补人声 → 胡言乱语。
@@ -2402,7 +2426,7 @@ export function createTimelinePanel(ctx) {
     title: "放大倍率 1–4：RTX / TE-FlashVSR / VOSR2 直接按倍数放大；SeedVR2 按「源短边 × 倍率」换算目标短边" });
   upScaleIn.oninput = () => { P.output.upscale_scale = Math.max(1, Math.min(4, Number(upScaleIn.value) || 2)); };
 
-  const el = h("div", { class: "col", style: { flex: "1 1 0", minHeight: 0, gap: 6 } },
+  const el = h("div", { class: "col", style: { flex: "1 1 0", minWidth: 0, minHeight: 0, gap: 6 } },
     // 参数区：flex 0 1 auto + 内部滚动 —— 面板高度不够时"参数区自己缩"，而不是把下面的
     // 工具条行挤出可视区（.mx-content 是 overflow:hidden，以前矮面板下工具条会被裁掉，
     // 表现为"导出按钮有时候不显示，点一下参数 tab 才出来"）
