@@ -18,7 +18,7 @@
       ComfyUI-SeedVR2_VideoUpscaler → SeedVR2 视频超分（二采）
 """
 
-__version__ = "1.11.15"
+__version__ = "1.11.16"
 
 import logging
 import os

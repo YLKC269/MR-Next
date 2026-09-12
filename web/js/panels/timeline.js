@@ -82,6 +82,10 @@ const DEFAULT_PARAMS = () => ({
     music: "",             // 画外配乐（留空 = N/A）
     no_speech: false,      // 静音模式：完全不要人声
     guard: true,           // 低步数音频护栏（steps < min_steps 自动抬升）
+    // 参考视频自带声轨也作为 <Audio j> 送进模型（官方 ref_video_audios.ref_video_audio_k，同号配对）。
+    // ⚠ 官方呈现顺序：图片 → 每个视频(先它的 <Audio j>、再 <Video k>) → 独立音频，
+    //   所以启用后 <Audio> 编号会「先数视频声轨、再数独立音频」。默认关，避免改变既有提示词。
+    video_audio_ref: false,
     min_steps: 8,          // 护栏安全线（社区实测 <8 步音频失真）
   },
 });
@@ -759,6 +763,10 @@ export function createTimelinePanel(ctx) {
           h("div", { class: "tl-flabel", title: "non_diegetic_music" }, "画外配乐（non_diegetic_music）"),
           musE),
         field("音频模式", amodeWrap, "timeline_data.output.audioMode"),
+        field("参考视频声轨", ckBox(() => A.video_audio_ref === true, (v) => { A.video_audio_ref = v; },
+          "也作为音频参考", "官方 ref_video_audios.ref_video_audio_k：把本镜参考视频自带的声轨一起送进模型。\n"
+          + "⚠ 官方 <Audio> 编号顺序是「先数参考视频的声轨、再数独立音频」—— 启用后本来写 <Audio 1> 的那句要往后挪。\n"
+          + "（需要 VHS 的 LoadVideoPath / LoadVideo 节点提供音轨；LoadVideoUI 无音轨输出）"), "video_audio_ref"),
         guardCk,
         field("护栏最低步数", minStepE, "audio_min_steps"),
         h("div", { class: "tl-field", style: { gridColumn: "1 / -1" } }, pvBtn),
@@ -1502,6 +1510,7 @@ export function createTimelinePanel(ctx) {
       av_ambience: (P.audio && P.audio.ambience) || undefined,
       av_music: (P.audio && P.audio.music) || undefined,
       av_no_speech: P.audio && P.audio.no_speech ? true : undefined,
+      video_audio_ref: P.audio && P.audio.video_audio_ref ? true : undefined,
       audio_guard: P.audio && P.audio.guard === false ? false : true,
       audio_min_steps: (P.audio && P.audio.min_steps) || undefined,
     };

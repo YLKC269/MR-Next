@@ -73,6 +73,7 @@ export function createPipelinePanel(ctx) {
       av_no_speech: audio.no_speech ? true : undefined,
       audio_guard: audio.guard === false ? false : true,
       audio_min_steps: audio.min_steps || undefined,
+      video_audio_ref: audio.video_audio_ref ? true : undefined,
     };
     Object.keys(o).forEach((k) => { if (o[k] === undefined || o[k] === "" || o[k] === null) delete o[k]; });
     return o;

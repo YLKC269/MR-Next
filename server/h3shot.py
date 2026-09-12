@@ -817,6 +817,7 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
         # 参考视频：官方 ref_video_k 收的是**帧序列 (IMAGE)**，不是文件路径
         #   → 需要一个「视频 → IMAGE 帧」的加载节点。优先 VHS（可控帧率/帧数），
         #     退回 ComfyUI 自带的 LoadVideoUI；两个都没有就跳过并记一笔（不让整镜失败）。
+        _video_audio_ref = bool(opts_obj.get("video_audio_ref"))
         _vload = None
         try:
             import nodes as _nodes_mod
@@ -839,10 +840,22 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
                             "custom_height": 0, "display_mode": "seconds",
                             "crop_x": 0, "crop_y": 0, "crop_w": 1, "crop_h": 1}
                 else:
-                    # 官方要求参考视频 2–15s @24fps；这里按 3s/72 帧封顶，避免参考 token 过多把显存吃光
+                    # 官方要求参考视频 2–15s @24fps；这里按 ~3s 封顶，避免参考 token 过多把显存吃光。
+                    # ⚠ 帧数必须满足官方的 **n % 17 == 5 且 n ≥ 5**：
+                    #   MiniMaxH3ReferenceToVideo 里有 `while n % 17 != 5: n -= 1`，
+                    #   不满足会被**静默截断**（最多白丢 16 帧 ≈ 0.67s）。
+                    #   合法值 5/22/39/56/73/90/…；73 ≈ 3.04s（旧值 72 非法 → 被截到 56）。
                     _vin = {"video": rel, "force_rate": 24.0, "custom_width": 0, "custom_height": 0,
-                            "frame_load_cap": 72, "skip_first_frames": 0, "select_every_nth": 1}
-                g_ins[f"ref_videos.ref_video_{k}"] = link(add(_vload, _vin))
+                            "frame_load_cap": 73, "skip_first_frames": 0, "select_every_nth": 1}
+                _vid_node = add(_vload, _vin)
+                g_ins[f"ref_videos.ref_video_{k}"] = link(_vid_node)
+                # ② 参考视频的**声轨** → ref_video_audios.ref_video_audio_{k}（官方同号配对）
+                #   官方呈现顺序：图片 → 每个视频(先它自己的 <Audio j>，再 <Video k>) → 独立音频；
+                #   所以一旦启用，**<Audio> 的编号会「先数视频声轨、再数独立音频」**（官方语义）。
+                #   默认不启用：不勾就完全不改变音频编号，不会影响既有提示词。
+                #   VHS 的 LoadVideoPath/LoadVideo 第 3 个输出(idx 2) 就是 AUDIO；LoadVideoUI 没有音轨输出。
+                if _video_audio_ref and _vload != "LoadVideoUI":
+                    g_ins[f"ref_video_audios.ref_video_audio_{k}"] = link(_vid_node, 2)
         g_ins["prompt"] = prompt
         g_ins["duration_sec"] = float(seconds)
         grp = add("MiniMaxH3DirectorGroupReferenceToVideo", g_ins)
