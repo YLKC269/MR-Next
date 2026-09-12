@@ -1907,6 +1907,11 @@ export function createTimelinePanel(ctx) {
         if (_aunres.length) {
           _warns.push(`<Audio ${_aunres.join("> <Audio ")}> 解析不到音频素材（既没有手动绑定，素材库里也没有第 ${_aunres[0]} 个音频）→ 这几条音色参考不会生效；请在正文里改用 @音频名，或点音频格从素材库挑一个`);
         }
+      } else if (auds.length && P.mode === "r2v") {
+        // ★ 最常见的一种"音色参考不被引用"：格子挂了音频，但正文里根本没写 <Audio N>。
+        //   官方只把「正文里写到的 <Audio N>」当音色参考（参考槽与正文标记必须对上号），
+        //   不写就等于挂了个寂寞 —— 必须明说，否则用户会一直以为是自己操作错了。
+        _warns.push(`音色/音频格里挂了 ${auds.length} 个音频，但正文里没有 <Audio N> 标记 → 官方不会把它当音色参考。请在正文加一行，例如「音色参考：<Audio 1>」（第 N 个挂进去的音频对应 <Audio N>）`);
       }
       // 参考视频回执：官方只在 R2V 有 ref_videos.ref_video_{k} 槽位
       const _vtags = [...new Set([...String(text).matchAll(/<\s*Video\s*(\d+)\s*>/gi)]
@@ -1968,6 +1973,12 @@ export function createTimelinePanel(ctx) {
       ? `首帧${(frames && frames[0]) ? "✓" : "✗"} 尾帧${(frames && frames[1]) ? "✓" : "✗"}`
       : `图${imgs.length} 视${c.media.video.length} 音${c.media.audio.length}`}${(!isFramesMode && !imgs.length) ? " · 无素材(纯文本)" : ""}）`
       + (_warns.length ? ` ｜ ⚠ ${_warns.join(" ｜ ⚠ ")}` : ""), _warns.length ? "#ffb35c" : "#9fd0ff");
+    // 参考类告警（音色/视频/静音）额外弹一次 toast：日志行是单行、会被后续覆盖，
+    // 用户实报「音色参考一直不被引用」往往就是因为这些提示压根没被看到。
+    try {
+      const _refWarn = _warns.find((m) => /音色|<Audio|参考视频|<Video/.test(m));
+      if (_refWarn) ctx.toast(_refWarn, true);
+    } catch (_) {}
     // 生成中实时预览：低频轮询采样 preview 图（不占资源）
     // 关键：带本次起始时间戳，只认"本次开始之后写盘"的预览图 —— 否则会把上一轮（甚至别的
     // 模式 / 别的镜）留在预览目录里的旧图当成"本次实时预览"显示，看起来就像"还在用以前的参考图"。

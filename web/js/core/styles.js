@@ -18,7 +18,10 @@ export const CSS = `
   --accent: var(--mrnext-accent);
   --accent-soft: var(--mrnext-accent-soft); }
 * { box-sizing: border-box; }
-.mrnext-root { display: flex; flex-direction: column; height: 100%; overflow: hidden; position: relative; }
+.mrnext-root { display: flex; flex-direction: column; height: 100%; overflow: hidden; position: relative;
+  /* 宽度只由节点决定：内容（分镜越多轨道越宽）不得反过来把节点撑宽。
+     contain:inline-size 让根元素的 inline 尺寸不受后代影响 —— 这是「加分镜不再加长节点宽度」的关键。 */
+  contain: inline-size; }
 /* Skill 优化面板：左右双栏 —— 左「① 技能库 / ② 本地模型」，右「③ 优化」填满右侧空白，
    并随面板高度自适应缩放（两个多行框 flex 拉伸，面板变高就变高，变矮就缩，不溢出）。 */
 .mx-content[data-panel="skill"] { display: flex; flex-direction: column; overflow: hidden; }
@@ -913,13 +916,14 @@ select.select:focus option:checked { box-shadow: inset 0 0 0 999px rgba(245,202,
   max-height: none; padding-right: 10px; border-right: 1px solid rgba(120,170,255,.16); }
 /* 提示词文本区：不再无限拉伸（旧实现它吃掉全部剩余宽度 = 用户反馈"文本框太宽、挤压预览"）。
    max-width 让富余空间主动让给右侧预览框；min-width 0 保证窄面板下能正常收缩。 */
-.mm-prompt { padding-left: 10px; padding-right: 10px; max-width: 680px; min-width: 0; }
+.mm-prompt { padding-left: 10px; padding-right: 10px; max-width: 430px; min-width: 0; flex: 0 1 auto; }
 .mm-prompt .mention-ed { max-height: none; }
 /* 实时预览框：跟着 --mm-pv 走，正方形恒定（宽高同步），不跳版 */
 .mm-preview { flex: 0 0 var(--mm-pv); width: var(--mm-pv);
   min-width: var(--mm-pv); max-width: var(--mm-pv);
-  height: var(--mm-pv); min-height: var(--mm-pv); max-height: var(--mm-pv); }
-.mm-preview { margin-left: auto; }
+  height: var(--mm-pv); min-height: var(--mm-pv); max-height: var(--mm-pv);
+  /* 紧贴提示词框：不要 margin-left:auto（那是把它推到最右边、中间留一大片空） */
+  margin-left: 10px; }/* 预览框紧贴提示词（不再 margin-left:auto 推到最右） */
 .mm-pv-title { font-size: clamp(10px, .95cqw, 11.5px); }
 /* 剪辑轨道：随高度自适应，标尺不挤 */
 .ed-ruler { height: clamp(17px, 2.2cqh, 24px) !important; }

@@ -4,7 +4,7 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { mountApp } from "./app.js";
 
-const MRNEXT_VERSION = "1.11.30"; // 改这个就能让你 Ctrl+F5 后用右键"检查"看 widget header 是不是新版本
+const MRNEXT_VERSION = "1.11.31"; // 改这个就能让你 Ctrl+F5 后用右键"检查"看 widget header 是不是新版本
 console.log("[MRBoardNext] extension loaded · v" + MRNEXT_VERSION);
 
 app.registerExtension({
@@ -58,7 +58,10 @@ function mountStudioNode(node) {
       const s = node.size || [W, H];
       const w0 = Number(s[0]) || 0;
       const h0 = Number(s[1]) || 0;
-      const w = Math.max(w0, W);
+      // 宽度**固定**为设计值：ComfyUI 在 DOM widget 重排后会按 computeSize() 回写 node.size，
+      // 分镜越多轨道内容越宽 → 节点被一路撑宽（用户实报"加分镜一直加长节点宽度"）。
+      // 这里直接夹住宽度（内容侧另有 contain:inline-size 兜底），高度仍只保底、不干预放大。
+      const w = W;
       const h = Math.max(h0, H);
       if (w !== w0 || h !== h0) {
         node.__mrnextLocking = true;

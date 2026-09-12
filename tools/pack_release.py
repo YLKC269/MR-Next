@@ -25,8 +25,8 @@ PKG = os.path.basename(SRC)
 # 默认输出目录：包在 custom_nodes/<pkg> 时输出到 custom_nodes 的**上一级**
 # （避免 zip 落在 custom_nodes 里跟节点混在一起）；其它位置则输出到包的上一级。
 _PARENT = os.path.dirname(SRC)
-# 包在 custom_nodes/<pkg> 时，输出到 custom_nodes 的**上一级**（即 ComfyUI 根目录之外），
-# 免得 zip 落在 ComfyUI 树里；其它位置则输出到包的上一级。
+# 包在 custom_nodes/<pkg> 时，默认输出到 custom_nodes 的**上一级**（即 ComfyUI 根目录下），
+# 不放 custom_nodes 里跟节点混在一起；想放别处请显式传输出目录。
 _DEFAULT_OUT = (os.path.dirname(_PARENT)
                 if os.path.basename(_PARENT).lower() == "custom_nodes" else _PARENT)
 OUT_DIR = sys.argv[1] if len(sys.argv) > 1 else _DEFAULT_OUT

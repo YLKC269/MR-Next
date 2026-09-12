@@ -905,30 +905,40 @@ def build_shot_graph(mode, prompt, seed=0, seconds=5.0, frame_rate=24.0,
             if not spr:
                 continue
             bn = s.get("refByNum") if isinstance(s.get("refByNum"), dict) else {}
-            pic = bn.get("picture") if isinstance(bn.get("picture"), dict) else {}
-            numbered = []
-            for k, v in (pic or {}).items():
-                try:
-                    numbered.append((int(k), str(v or "").replace("\\", "/").strip()))
-                except (TypeError, ValueError):
-                    continue
-            numbered = [(n, rel) for n, rel in sorted(numbered) if rel]
-            extras = [str(x).replace("\\", "/").strip()
-                      for x in ((s.get("media") or {}).get("image") or []) if x]
-            rels, rename = [], {}
-            for n, rel in numbered:
-                if rel not in rels:
-                    rename[n] = len(rels) + 1
-                    rels.append(rel)
-            for rel in extras:
-                if rel and rel not in rels and len(rels) < 9:
-                    rels.append(rel)
-            spr = _renum(_renum(spr, "Picture", rename), "Image", rename)
+            md_seg = s.get("media") if isinstance(s.get("media"), dict) else {}
+
+            def _by_num_and_extras(num_map, extras, cap):
+                """按正文编号升序 → 连续槽位，并给出 {旧编号: 新编号}（官方不变量：
+                `<Xxx N>` 必须对应第 N 个**非空**槽；跳号会让参考静默失效）。"""
+                pairs = []
+                for k, v in (num_map or {}).items():
+                    try:
+                        pairs.append((int(k), str(v or "").replace("\\", "/").strip()))
+                    except (TypeError, ValueError):
+                        continue
+                pairs = [(n, rel) for n, rel in sorted(pairs) if rel]
+                rels, rename = [], {}
+                for n, rel in pairs:
+                    if rel not in rels and len(rels) < cap:
+                        rename[n] = len(rels) + 1
+                        rels.append(rel)
+                for rel in (extras or []):
+                    rel = str(rel or "").replace("\\", "/").strip()
+                    if rel and rel not in rels and len(rels) < cap:
+                        rels.append(rel)
+                return rels, rename
+
+            img_rels, img_rename = _by_num_and_extras(bn.get("picture"), md_seg.get("image"), 9)
+            aud_rels, aud_rename = _by_num_and_extras(bn.get("audio"), md_seg.get("audio"), 3)
+            spr = _renum(_renum(spr, "Picture", img_rename), "Image", img_rename)
+            # ⚠ 音色参考也要重编号：官方 ref_audios 是按「第 N 个非空槽 → <Audio N>」编号的，
+            #   只填第 2 个音色时若不重编号，正文里的 <Audio 2> 会指向不存在的参考 → 静默不生效
+            #   （用户长期反馈"音色参考一直不被引用"）。
+            spr = _renum(spr, "Audio", aud_rename)
             gi = {}
-            for k, rel in enumerate(rels[:9]):
+            for k, rel in enumerate(img_rels):
                 gi[f"ref_images.ref_image_{k}"] = link(add("LoadImage", {"image": rel}))
-            for k, rel in enumerate([str(x).replace("\\", "/").strip()
-                                     for x in ((s.get("media") or {}).get("audio") or []) if x][:3]):
+            for k, rel in enumerate(aud_rels):
                 gi[f"ref_audios.ref_audio_{k}"] = link(add("LoadAudio", {"audio": rel}))
             gi["prompt"] = spr
             try:
