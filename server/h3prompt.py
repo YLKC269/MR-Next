@@ -274,19 +274,38 @@ def _pick_lang(visual, style, dialogue):
 #   【本镜音效】
 #   卡通特效音：拍桌子哐当
 #   环境音：房间安静、烛火噼啪
-RE_CAST_HEAD = re.compile(r"^\s*\**\s*[【\[]\s*本\s*镜\s*出场\s*角色\s*[】\]]\s*\**\s*$")
-RE_POS_HEAD = re.compile(r"^\s*\**\s*[【\[]\s*本\s*镜\s*站位\s*[】\]]\s*\**\s*$")
-RE_SFX_HEAD = re.compile(r"^\s*\**\s*[【\[]\s*本\s*镜\s*音效\s*[】\]]\s*\**\s*$")
+# ⚠ 三个块头正则必须带 re.M：`is_production_shot()` 是对**整段多行文本**用 `.search()`，
+#   没有 re.M 时 `^`/`$` 只认整串首尾 → 「有【本镜音效】但没有 <d> 台词」的镜头会被判成
+#   "不是生产模板"，音效块整段被当画面描述（无台词镜头丢音效）。
+#   带 re.M 后 `.match(单行)` 的行为不变（单行里 ^/$ 语义相同）。
+RE_CAST_HEAD = re.compile(r"^\s*(?:[-•]\s*)?\**\s*[【\[]?\s*本\s*镜\s*出场\s*角色\s*[】\]]?\s*\**\s*$", re.M)
+RE_POS_HEAD = re.compile(r"^\s*(?:[-•]\s*)?\**\s*[【\[]?\s*本\s*镜\s*站位\s*[】\]]?\s*\**\s*$", re.M)
+RE_SFX_HEAD = re.compile(r"^\s*(?:[-•]\s*)?\**\s*[【\[]?\s*本\s*镜\s*音效\s*[】\]]?\s*\**\s*$", re.M)
 # `<Picture 1> 云妙衣（S1）：外观描述` / `<Picture 1> 云妙衣：站位描述`
+# ⚠ 容错（用户实报「乱说话」的根因之一）：块头/条目**不一定**带【】、**不一定**用冒号、
+#   行首**常常带 markdown 短横线** —— LLM 写剧本和用户手写都很容易产出
+#   `本镜出场角色` + `- <Picture 5> 星河巨蚁巨兽` 这种形态。
+#   旧正则要求「必须【】+ 必须冒号 + 不能有短横线」，三条都不满足 → 整块不识别：
+#   角色表为空、S 编号丢失、音效丢失，而且**整段原文会被当画面描述塞进提示词**。
 RE_CAST_LINE = re.compile(
-    r"^\s*<\s*(Picture|Video|Audio|Subject)\s*(\d+)\s*>\s*([^：:\n]{1,24}?)\s*"
-    r"(?:[（(]\s*(S\s*\d+)\s*[）)])?\s*[:：]\s*(.+)$", re.IGNORECASE)
-RE_DUR_LABEL = re.compile(r"^\s*[\[（(]?\s*时长\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*秒?\s*[\]）)]?\s*$")
+    r"^\s*(?:[-•]\s*)?\**\s*<\s*(Picture|Video|Audio|Subject)\s*(\d+)\s*>\s*([^：:\n]{0,24}?)\s*"
+    r"(?:[（(]\s*(S\s*\d+)\s*[）)])?\s*(?:[:：]\s*(.*))?$", re.IGNORECASE)
+# 站位行也可能是「标签在前」：`- 前半段：<Picture 1> 站左侧抬手施法`
+RE_POS_LABEL_LINE = re.compile(
+    r"^\s*(?:[-•]\s*)?\**\s*([^：:\n<>]{1,12}?)\s*[:：]\s*(.*<\s*(?:Picture|Video|Subject)\s*\d+\s*>.*)$")
+RE_DUR_LABEL = re.compile(r"^\s*(?:[-•]\s*)?[\[（(]?\s*时长\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*秒?\s*[\]）)]?\s*$")
 RE_SFX_LABEL = re.compile(
-    r"^\s*(卡通特效音|特效音|角色动作音|动作音|道具音|"
+    r"^\s*(?:[-•]\s*)?(卡通特效音|特效音|角色动作音|动作音|道具音|"
     r"液体\s*[/／]\s*分泌物音|液体音|环境音|人声拟音|配乐|背景音乐|音乐)\s*[:：]\s*(.*)$")
 RE_D_TAG = re.compile(r"<\s*d\s*>(.*?)<\s*/\s*d\s*>", re.S | re.IGNORECASE)
 RE_ANY_TAG = re.compile(r"<\s*(Picture|Video|Audio|Subject)\s*(\d+)\s*>", re.IGNORECASE)
+# 正文里**显式写的说话人标签**：`旁白（S1）嘴巴不动，低沉男声：<d>…</d>` / `咻咻（S3）…：<d>`
+# 取该段落里**最后一次**出现的那一个（一句话前可能先描述了别人）。
+# 为什么必须有它：只按"最近的 <Picture N>"判说话人，会把旁白/第三个角色的台词安到
+# 紧邻的角色头上，而且两句都会落到同一个 S 编号（用户实报「乱说话」就是这个）。
+RE_SPEAKER_LABEL = re.compile(r"([\u4e00-\u9fffA-Za-z]{1,8})\s*[（(]\s*(S\s*\d+)\s*[）)]")
+# 旁白类说话人（画外音）：不该渲染成"内心独白"（那是角色心理活动），直接 says
+RE_NARRATOR = re.compile(r"^(旁白|画外音|旁述|解说|narrator|v\.?o\.?)$", re.IGNORECASE)
 # 行首时间码（00:08.000，）—— 生产模板里每镜标开始时刻，不是画面内容
 RE_TC_LINE_PREFIX = re.compile(r"^\s*\d{1,2}\s*[:：]\s*\d{1,2}(?:\s*\.\s*\d{1,3})?\s*[，,、]?\s*")
 # 结构化标记行（[场景：…] / 【镜头 N】 / 【分镜 N】 / [时长 …]）—— 出现即结束当前块
@@ -583,6 +602,11 @@ def parse_shot_blocks(text, role_names=None, tag_roles=None, tag_sids=None):
             if m:
                 positions.append("%s：%s" % ((m.group(3) or "").strip(), (m.group(5) or "").strip()))
                 continue
+            # 「标签在前」的写法：`- 前半段：<Picture 5> 星空超大全景，蚁群如黑色洪流`
+            m2 = RE_POS_LABEL_LINE.match(ln)
+            if m2:
+                positions.append("%s：%s" % (m2.group(1).strip(), m2.group(2).strip().rstrip("。")))
+                continue
             section = None
         if section == "sfx":
             m = RE_SFX_LABEL.match(ln)
@@ -608,31 +632,43 @@ def parse_shot_blocks(text, role_names=None, tag_roles=None, tag_sids=None):
         for m in RE_D_TAG.finditer(ln):
             seg = ln[pos:m.start()]
             who, audio_n = "", 0
-            # 说话人判定：最近的 <Picture/Subject/Video N>（<Audio N> 只是音色参考，
-            # 不能当说话人，否则台词会全部归到 S1）→ 其次段落里出现过的角色名 → 再其次沿用上一位
-            refers = list(RE_ANY_TAG.finditer(seg))
-            pick = [r for r in refers if (r.group(1) or "").lower() != "audio"]
-            if not pick:
-                pick = refers
-            if pick:
-                who = _tag_key(pick[-1].group(0))
-            # 正文里的 <Picture N> 前缀里有声明 → 补一条 cast（模板正文常用这类指代）
-            if who and who not in cast and tag_roles.get(who):
-                cast[who] = {"name": tag_roles[who], "sid": tag_sids.get(who, ""), "desc": ""}
-            if not who or not cast.get(who, {}).get("name"):
-                named = [v["name"] for v in cast.values()
-                         if v.get("name") and v["name"] in seg]
-                if not named:
-                    for _k, _nm in tag_roles.items():
-                        if _nm and _nm in seg:
-                            named.append(_nm)
-                if named:
-                    who = named[-1]
-                    who = next((k for k, v in cast.items() if v["name"] == who), who)
-                    if who not in cast:
-                        cast[who] = {"name": named[-1], "sid": "", "desc": ""}
-            if not who or not cast.get(who, {}).get("name"):
-                who = last_who
+            # ★ 说话人判定 ①：正文里**显式写的**「名字（Sx）」标签最权威。
+            #   例：`…毛都炸起来。旁白（S1）嘴巴不动，低沉男声：<d>…</d>`
+            #   只按"最近的 <Picture N>"取 → 会把这个 <d> 归给紧邻的 <Picture 4> 咻咻，
+            #   于是旁白的台词被咻咻说了、而且两句台词都落到同一个 S 编号
+            #   （用户实报「乱说话」）。取段落里最后一次出现的标签。
+            lbl_name = lbl_sid = ""
+            for _lm in RE_SPEAKER_LABEL.finditer(seg):
+                lbl_name = (_lm.group(1) or "").strip()
+                lbl_sid = re.sub(r"\s+", "", _lm.group(2) or "").upper()
+            if lbl_name:
+                who = next((k for k, v in cast.items() if v.get("name") == lbl_name), lbl_name)
+            if not who:
+                # 说话人判定 ②：最近的 <Picture/Subject/Video N>（<Audio N> 只是音色参考，
+                # 不能当说话人，否则台词会全部归到 S1）→ 其次段落里出现过的角色名 → 再其次沿用上一位
+                refers = list(RE_ANY_TAG.finditer(seg))
+                pick = [r for r in refers if (r.group(1) or "").lower() != "audio"]
+                if not pick:
+                    pick = refers
+                if pick:
+                    who = _tag_key(pick[-1].group(0))
+                # 正文里的 <Picture N> 前缀里有声明 → 补一条 cast（模板正文常用这类指代）
+                if who and who not in cast and tag_roles.get(who):
+                    cast[who] = {"name": tag_roles[who], "sid": tag_sids.get(who, ""), "desc": ""}
+                if not who or not cast.get(who, {}).get("name"):
+                    named = [v["name"] for v in cast.values()
+                             if v.get("name") and v["name"] in seg]
+                    if not named:
+                        for _k, _nm in tag_roles.items():
+                            if _nm and _nm in seg:
+                                named.append(_nm)
+                    if named:
+                        who = named[-1]
+                        who = next((k for k, v in cast.items() if v["name"] == who), who)
+                        if who not in cast:
+                            cast[who] = {"name": named[-1], "sid": "", "desc": ""}
+                if not who or not cast.get(who, {}).get("name"):
+                    who = last_who
             last_who = who
             # 音色参考：只认紧贴台词的写法
             seg, audio_n = split_voice_ref(seg)
@@ -642,12 +678,15 @@ def parse_shot_blocks(text, role_names=None, tag_roles=None, tag_sids=None):
             txt = txt.strip(" 「」『』“”\"'")
             txt = re.sub(r"^\s*[\[【]\s*(?:[A-Za-z]+|中文|Chinese|English)\s*[\]】]\s*", "", txt).strip()
             if txt:
-                sid = (entry.get("sid") or "").strip() or tag_sids.get(who, "")
+                sid = (entry.get("sid") or "").strip() or lbl_sid or tag_sids.get(who, "")
                 if not sid and hint_sids:
                     sid = hint_sids[min(hint_turn, len(hint_sids) - 1)]
                     hint_turn += 1
-                dialogue.append({"speaker": entry.get("name", ""), "sid": sid,
-                                 "text": txt, "inner": bool(RE_INNER.search(seg)),
+                # 旁白/画外音即使写了「嘴巴不动」也不是内心独白 —— 直接 says，
+                # 免得渲染成「旁白 内心独白」（模型会当成画中人心理活动，口型处理就乱了）
+                inner = bool(RE_INNER.search(seg)) and not RE_NARRATOR.match(lbl_name or "")
+                dialogue.append({"speaker": (entry.get("name") or lbl_name or ""), "sid": sid,
+                                 "text": txt, "inner": inner,
                                  "audio": audio_n})
             pos = m.end()
         out.append(ln[pos:])
