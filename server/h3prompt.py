@@ -394,7 +394,7 @@ RE_PREFIX_TAG_FIRST = re.compile(
     r"^\s*[-*•]?\s*<\s*(Picture|Subject)\s*(\d+)\s*>\s*([^：:\n（(的]{1,20}?)\s*"
     r"(?:[（(]\s*(S\s*\d+)\s*[）)])?\s*[：:]")
 RE_PREFIX_ROLE_LINE = re.compile(
-    r"^\s*[-*•]?\s*(?:角色|人物|主角|配角)\s*\d*\s*[-－—–:：]?\s*([^：:\n]{1,20}?)\s*[：:]\s*(.+)$")
+    r"^\s*[-*•]?\s*[【\[]?\s*(?:角色|人物|主角|配角)\s*\d*\s*[】\]]?\s*[-－—–:：]?\s*([^：:\n]{1,20}?)\s*[：:]\s*(.+)$")
 RE_PREFIX_SID = re.compile(r"[（(]\s*(S\s*\d+)\s*[）)]")
 # 非角色的行首词（场景/道具/音效…里也会出现 <Picture N>，那是参考图不是说话人）
 NON_ROLE_HEADS = ("场景", "地点", "时间", "道具", "音效", "配乐", "音乐", "画面", "风格", "光线")
@@ -466,7 +466,10 @@ def prefix_tag_roles(prefix, names=None):
             key = _tag_key(t.group(0))
             if key and key not in tag_roles:
                 tag_roles[key] = nm
-                sid = RE_PREFIX_SID.search(nm + rest)
+                # ⚠ S 编号必须从**未经切割**的原始名字段里找：上面 `nm` 已按「（」切掉
+                # 「（S1）」，再去 `nm + rest` 里找 (Sx) 必然找不到 → tag_sids 永远为空，
+                # 作者指写的编号被丢掉（多角色镜头就会全落到自动分配的第一个编号上）。
+                sid = RE_PREFIX_SID.search(m.group(1) or "")
                 if sid:
                     tag_sids[key] = re.sub(r"\s+", "", sid.group(1)).upper()
     return tag_roles, tag_sids
@@ -600,7 +603,9 @@ def parse_shot_blocks(text, role_names=None, tag_roles=None, tag_sids=None):
         if section == "pos":
             m = RE_CAST_LINE.match(ln)
             if m:
-                positions.append("%s：%s" % ((m.group(3) or "").strip(), (m.group(5) or "").strip()))
+                # rstrip 句号：站位拼进提示词时是 `；` 连接的，留着句号会出现「…地球。；安澜：…」
+                positions.append("%s：%s" % ((m.group(3) or "").strip(),
+                                             (m.group(5) or "").strip().rstrip("。.")))
                 continue
             # 「标签在前」的写法：`- 前半段：<Picture 5> 星空超大全景，蚁群如黑色洪流`
             m2 = RE_POS_LABEL_LINE.match(ln)
