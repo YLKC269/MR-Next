@@ -62,6 +62,28 @@ const loraUnetConflict = (lora) => {
   return "";
 };
 
+// ---------- 「风格 LoRA × 蒸馏 LoRA 叠挂」警告 ----------
+// 用户实报「模型页加了风格 LoRA 就画质模糊」。实测证据（读 safetensors 头部，不加载权重）：
+//   · 那类风格 LoRA（如「Minimax H3真实电影质感」= 电影镜头，ai-toolkit 训练、rank 16、**无 alpha**）
+//     作用在**整条主干**：attn.qkv_proj / attn.out_proj / mlp.fc1 / mlp.fc2 / **adaln_proj.linear**，
+//     横跨全部 50 个 block —— 而且 258/258 层与所有 H3 基座**完全匹配**（不是加载失败）。
+//   · 蒸馏 LoRA（4/8 步）是把模型**压到极少步数**采样的轨迹。再叠一个强度 1.0 的全主干风格 LoRA，
+//     等于把模型推离那条轨迹；4/8 步内采样器收不回来 → 典型表现就是**发糊/发灰**。
+//     其中 adaln_proj 是"按时间步做特征调制"的投影，扰动它影响最直接。
+// 所以这里把"叠挂 + 高强度"明确提示出来，并给出两条可执行出路（降强度 / 关蒸馏并提步数）。
+function loraStackWarn(P) {
+  const has = (x) => x && x !== "(无)";
+  const st = (P && P.model && P.model.lora) || "";
+  const sp = (P && P.speed && P.speed.lora) || "";
+  if (!has(st) || !has(sp)) return "";
+  const a = Number(P.model.loraS), b = Number(P.speed.loraS);
+  const hi = (isNaN(a) || a >= 0.9) && (isNaN(b) || b >= 0.9);
+  return `风格 LoRA「${st}」与蒸馏 LoRA「${sp}」同时挂着${hi ? "，且都是 1.0 强度" : ""}：`
+    + "蒸馏 LoRA 是把模型压到 4/8 步的轨迹，再叠一个全主干（qkv/out_proj/mlp/adaln）风格 LoRA "
+    + "会把模型推离该轨迹，4/8 步内收不回来 → 画面发糊/发灰（不是没加载）。"
+    + "改法二选一：① 风格 LoRA 强度降到 0.4–0.6；② 关掉蒸馏 LoRA，步数提到 20 以上。";
+}
+
 const DEFAULT_PARAMS = () => ({
   mode: "t2v",
   model: { unet: "", clip: "", vvae: "", avae: "", lora: "(无)", loraS: 1, autoUnet: true },
@@ -699,13 +721,14 @@ export function createTimelinePanel(ctx) {
       const loraE = sel(["(无)"].concat((opts.loras || []).filter((n) => !isForeignLora(n))), P.model.lora);
       const loraWarn = h("div", { class: "muted", style: { gridColumn: "1 / -1", fontSize: "11px", lineHeight: "1.55" } });
       const paintLoraWarn = () => {
-        const msg = loraUnetConflict(loraE.value);
+        const msg = loraUnetConflict(loraE.value) || loraStackWarn(P);
         loraWarn.textContent = msg ? "⚠ " + msg : "";
         loraWarn.style.color = msg ? "#ffb4b4" : "";
       };
       loraE.onchange = () => { P.model.lora = loraE.value; paintLoraWarn(); };
       paintLoraWarn();
-      const loraSE = num(P.model.loraS, "1", 52, 0.1); loraSE.oninput = () => { P.model.loraS = Number(loraSE.value) || 1; };
+      const loraSE = num(P.model.loraS, "1", 52, 0.1);
+      loraSE.oninput = () => { P.model.loraS = Number(loraSE.value) || 1; paintLoraWarn(); };
       // CLIP 选型提示：H3 是 cfg=1.0（无负引导）模型，画面全靠文本 embedding 指路。
       // nvfp4/fp4 这类 4bit 量化 CLIP 省内存，但语义会打折，症状就是「画面不按提示词走」，
       // 所以把这句话直接摆在下拉旁边，让用户知道自己此刻跑的是哪一档。
@@ -1035,13 +1058,14 @@ export function createTimelinePanel(ctx) {
       const accLoraE = sel(loraPool, P.speed.lora);
       const accLoraWarn = h("div", { class: "muted", style: { gridColumn: "1 / -1", fontSize: "11px", lineHeight: "1.55" } });
       const paintAccLoraWarn = () => {
-        const msg = loraUnetConflict(accLoraE.value);
+        const msg = loraUnetConflict(accLoraE.value) || loraStackWarn(P);
         accLoraWarn.textContent = msg ? "⚠ " + msg : "";
         accLoraWarn.style.color = msg ? "#ffb4b4" : "";
       };
       accLoraE.onchange = () => { P.speed.lora = accLoraE.value; paintAccelStatus(); paintAccLoraWarn(); };
       paintAccLoraWarn();
-      const accLoraSE = num(P.speed.loraS, "1", 46, 0.1); accLoraSE.oninput = () => { P.speed.loraS = Number(accLoraSE.value) || 1; paintAccelStatus(); };
+      const accLoraSE = num(P.speed.loraS, "1", 46, 0.1);
+      accLoraSE.oninput = () => { P.speed.loraS = Number(accLoraSE.value) || 1; paintAccelStatus(); paintAccLoraWarn(); };
       // 官方 Block Sparse Attention 加速（sageattn）
       const SAGE_MODES = [
         ["disabled", "关闭"],
