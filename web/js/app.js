@@ -84,6 +84,10 @@ export function mountApp(shadow, node) {
     // LoRA（3 个面板联动：生图 / 公共前缀 / 流水线）
     useLora: false,        // 是否启用 LoRA（关闭 = 编辑 LoRA 留空，不影响其他流程）
     loraFolder: "",        // 自定义 LoRA 文件夹（空 = 后端默认 models/loras）
+    // Krea2 风格扩展（生图 / 流水线设定图 共享）：[{id, label}]
+    //   id 形如 "动漫::Anime Style"（后端 server/styles.py 生成，唯一可引用）；
+    //   后端按 Easy-Use stylesSelector 语义把风格 prompt 套到用户提示词上，4 种模式都生效。
+    genStyles: [],
     ..._loadStore(),
   });
   // 把 store 交给资产注册表：素材/收藏改名时自动重映射 store.refMap（每镜素材引用），

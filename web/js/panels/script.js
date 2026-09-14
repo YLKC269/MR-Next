@@ -7,6 +7,7 @@ import { SIZES, DEFAULT_SIZE_INDEX, CUSTOM_SIZE_INDEX, resolveSize } from "../co
 import { parsePrefixDef, planDefinitionJobs } from "../core/prefix_parser.js";
 import { createLoraControls } from "./lora_controls.js";
 import { createLoraPicker } from "./lora_picker.js";
+import { createStylePicker } from "./style_picker.js";
 import { pickAssetFolder } from "../core/ui.js";
 
 export function createScriptPanel(ctx) {
@@ -513,6 +514,8 @@ export function createScriptPanel(ctx) {
               height: job.h,
               steps: Number(ctx.store.get().genSteps) || 8,
               ...({ loras: (ctx.store.get().loras || []), lora_folder: (ctx.store.get().loraFolder || "") }),
+              // 风格扩展：与「生图」面板共享选择（后端按 Easy-Use 语义改写提示词）
+              ...(stylePicker.ids().length ? { styles: stylePicker.ids() } : {}),
             });
             if (res.ok) {
               // 自动改名：把机器名（1788948454574_xxx.png）改成剧本写的名字（如「林晚.png」），
@@ -583,6 +586,8 @@ export function createScriptPanel(ctx) {
   const loraCtl = createLoraControls(ctx, { inline: true, onChange: () => { /* 文件夹/开关变化由 picker 自己刷新 */ } });
   // 🎚 点击弹出 LoRA 列表 → 设定图/角色图也吃 LoRA（后端对所有模式生效）
   const loraPicker = createLoraPicker(ctx, {});
+  // 🎨 Krea2 风格扩展 → 设定图也吃风格（与「生图」面板共享 store.genStyles，同源同语义）
+  const stylePicker = createStylePicker(ctx, {});
 
   // 「角色/场景设定图」面板
   const genDefSection = h(
@@ -600,6 +605,8 @@ export function createScriptPanel(ctx) {
       sizeSel, defWIn, h("span", { class: "muted", style: { fontSize: 11 } }, "×"), defHIn,
     ),
     h("div", { style: { marginTop: 4, fontSize: 11, color: "#a8bbd0" } }, loraCtl.row, loraPicker.row),
+    h("div", { style: { marginTop: 4, fontSize: 11, color: "#a8bbd0" } },
+      h("span", { style: { color: "#9ad6ff", fontWeight: 700 } }, "🎨 "), stylePicker.row),
     genLog
   );
 

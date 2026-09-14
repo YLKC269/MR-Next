@@ -7,6 +7,7 @@ import { lightbox } from "../core/ui.js";
 import { SIZES, DEFAULT_SIZE_INDEX, CUSTOM_SIZE_INDEX, resolveSize } from "../core/sizes.js";
 import { createLoraControls } from "./lora_controls.js";
 import { createLoraPicker } from "./lora_picker.js";
+import { createStylePicker } from "./style_picker.js";
 
 const MODES = [
   { key: "t2i",  label: "✨ 文生图",   hint: "文字直接生图" },
@@ -54,6 +55,30 @@ export function createGeneratePanel(ctx) {
   const promptTa = h("textarea", { class: "textarea", placeholder: PLACEHOLDER.t2i });
   promptTa.style.minHeight = "150px";
 
+  // 风格套用回显：选了风格后，这里显示「套用后的实际提示词」（后端正按这个送进 Krea2）
+  const styleHint = h("div", {
+    class: "muted",
+    style: {
+      display: "none", marginTop: 4, fontSize: 10.5, lineHeight: 1.5,
+      maxHeight: 88, overflowY: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word",
+      background: "rgba(6,12,22,.5)", border: "1px solid rgba(120,170,255,.16)",
+      borderRadius: 7, padding: "5px 8px",
+    },
+  });
+  function paintStyleHint() {
+    const sel = stylePicker.get();
+    if (!sel.length) { styleHint.style.display = "none"; styleHint.textContent = ""; return; }
+    const base = promptTa.value.trim();
+    const r = stylePicker.preview(base);
+    const head = `🎨 已套用 ${sel.length} 种风格：${sel.map((x) => x.label).join(" + ")}`
+      + (base ? "" : "（提示词为空，风格仍会生效）");
+    styleHint.textContent = head + "\n" + (r.positive || "（空）");
+    styleHint.style.display = "block";
+    styleHint.style.color = "#c9d6ec";
+  }
+  // 用户改提示词 → 回显跟着更新（用户能实时看到风格把词改成什么样）
+  promptTa.oninput = () => { try { paintStyleHint(); } catch (_) {} };
+
   const modelSel = h("select", { class: "select" });
   const teSel = h("select", { class: "select" });
   const vaeSel = h("select", { class: "select" });
@@ -61,6 +86,9 @@ export function createGeneratePanel(ctx) {
   const editLoraSel = h("select", { class: "select", id: "mrnext-gen-lorasel", style: { display: "none" } });
   // 🎚 点击弹出 LoRA 列表（点一项即用，可多选 + 调强度）——对所有生图模式生效
   const loraPicker = createLoraPicker(ctx, { onChange: () => { try { loadConfig(); } catch (_) {} } });
+  // 🎨 Krea2 风格扩展（3946 种，与 ComfyUI-Easy-Use/styles 同源）——对所有生图模式生效
+  // onChange 里只刷新提示词回显（不重载模型，风格不影响模型选择）
+  const stylePicker = createStylePicker(ctx, { onChange: () => { try { paintStyleHint(); } catch (_) {} } });
   const sizeSel = h("select", { class: "select", style: { width: "auto" } },
     ...SIZES.map(([label], i) => h("option", { value: String(i) }, label)));
   // 自定义宽高输入（选「自定义」档位时显示）
@@ -476,6 +504,9 @@ export function createGeneratePanel(ctx) {
             payload.loras = loraSel;
             payload.lora_folder = (ctx.store.get().loraFolder || "").trim();
           }
+          // 风格扩展：所有模式统一带上（后端按 Easy-Use 语义改写提示词，并把实际用的词回执）
+          const styleIds = stylePicker.ids();
+          if (styleIds.length) payload.styles = styleIds;
           if (mode === "i2i" || mode === "edit") {
             payload.src_rel = state.srcRel;
             if (mode === "i2i") payload.strength = state.strength;
@@ -583,11 +614,17 @@ export function createGeneratePanel(ctx) {
           h("span", { class: "muted", style: { fontSize: 11 } }, "Krea2 真实扩散 · 失败自动占位"),
         ),
         promptTa,
+        styleHint,
         srcRow, refRow,
         h("div", { class: "row", style: { marginTop: 6, flexWrap: "wrap", gap: 4, padding: "6px 8px", background: "rgba(255,207,107,.06)", border: "1px solid #5e3e10", borderRadius: 7 } },
           h("span", { style: { fontSize: 11, color: "#ffcf6b", fontWeight: 700 } }, "⚡ LoRA"),
           loraCtl.row,
           loraPicker.row,
+        ),
+        h("div", { class: "row", style: { marginTop: 6, flexWrap: "wrap", gap: 4, padding: "6px 8px", background: "rgba(154,214,255,.06)", border: "1px solid #1d4a5e", borderRadius: 7 } },
+          h("span", { style: { fontSize: 11, color: "#9ad6ff", fontWeight: 700 }, title: "Krea2 风格扩展：与 ComfyUI-Easy-Use 的「风格选择器」同源（styles 目录里的 47 个 JSON，共 3946 种）" }, "🎨 风格"),
+          stylePicker.row,
+          h("span", { class: "muted", style: { fontSize: 10.5 } }, "提示词会被风格自动改写 · 四种模式通用"),
         ),
         h("div", { class: "row", style: { marginTop: 8, flexWrap: "wrap" } },
           h("span", { class: "muted" }, "模型"), modelSel,

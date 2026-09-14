@@ -1706,6 +1706,60 @@ async def assetgen_config(req):
     })
 
 
+async def assetgen_styles(req):
+    """GET /mrnext/assetgen/styles —— Krea2 风格扩展库（与 ComfyUI-Easy-Use/styles 同源）。
+
+    返回 {dir, count, categories:[{key,label,count}], styles:[{id,name,label,category,prompt,
+    negative_prompt,thumb}]}。`thumb` 是相对 styles 目录的路径，前端拼
+    /mrnext/assetgen/style_thumb?p=<thumb> 取图（远端 URL 已在后端过滤为空）。
+    整库 3946 条，前端按分类折叠 + 搜索，不做分页。
+    Query: force=1 强制跳过缓存重读。
+    """
+    from . import styles as stylemod  # noqa: PLC0415
+
+    force = (req.query.get("force") or "").strip() in ("1", "true", "yes")
+    data = stylemod.load_styles(force=force)
+    out = {
+        "ok": True,
+        "dir": data.get("dir", ""),
+        "count": data.get("count", len(data.get("styles") or [])),
+        "categories": data.get("categories") or [],
+        "styles": [
+            {
+                "id": s["id"],
+                "name": s["name"],
+                "name_cn": s.get("name_cn", ""),
+                "label": s["label"],
+                "category": s["category"],
+                # prompt 里可能含 `{prompt}`（与 Easy-Use 语义一致），原样下发由前端预览替换
+                "prompt": s["prompt"],
+                "negative_prompt": s.get("negative_prompt", ""),
+                "thumb": stylemod.thumb_rel(s.get("thumb") or ""),
+            }
+            for s in (data.get("styles") or [])
+        ],
+    }
+    if data.get("error"):
+        out["error"] = data["error"]
+    return _json(out)
+
+
+async def assetgen_style_thumb(req):
+    """GET /mrnext/assetgen/style_thumb?p=<相对 styles 的路径> —— 风格缩略图。
+
+    自己起 FileResponse 而不是走 ComfyUI 的 /view：这些图片在 custom_nodes 下，
+    不在 input/output/temp 三个根里，/view 取不到。路径已做越界与扩展名校验。
+    """
+    from . import styles as stylemod  # noqa: PLC0415
+
+    p = (req.query.get("p") or "").strip()
+    full = stylemod.thumb_path(p)
+    if not full:
+        return web.Response(status=404, text="thumb not found")
+    headers = {"Cache-Control": "public, max-age=604800"}  # 风格缩略图内容不变，长缓存
+    return web.FileResponse(full, headers=headers)
+
+
 async def assetgen_generate(req):
     """生成图（4 模式：t2i/i2i/ref/edit），落盘到资产文件夹。
     mode: t2i(文生图) | i2i(图生图) | ref(参考生图) | edit(编辑图)
@@ -1714,7 +1768,8 @@ async def assetgen_generate(req):
     未选模型或执行失败 → 回退占位图，保证面板永远有反馈。
     """
     body = await req.json()
-    prompt = (body.get("prompt") or "").strip()
+    raw_prompt = (body.get("prompt") or "").strip()
+    prompt = raw_prompt
     folder = (body.get("folder") or "").strip()
     model = (body.get("model") or "").strip()
     seed = int(body.get("seed") or 0)
@@ -1785,6 +1840,18 @@ async def assetgen_generate(req):
             return _json({"ok": False, "error": _why}, status=500)
     if not prompt:
         return _json({"ok": False, "error": "提示词为空"}, status=400)
+    # ---- 风格扩展：把选中的 Krea2 风格套到提示词上（与 Easy-Use stylesSelector 同语义）----
+    style_ids = [str(x).strip() for x in (body.get("styles") or []) if str(x).strip()]
+    style_names = []
+    style_negative = ""
+    if style_ids:
+        try:
+            from . import styles as stylemod  # noqa: PLC0415
+            prompt, style_negative, style_names = stylemod.apply_styles(prompt, style_ids)
+        except Exception as _e:  # noqa: BLE001
+            logging.getLogger("ComfyUI-MRBoard.assetgen").warning("风格套用失败：%s", _e)
+    if not prompt:
+        return _json({"ok": False, "error": "提示词为空"}, status=400)
     if mode in ("i2i", "edit") and not src_rel:
         return _json({"ok": False, "error": ("i2i" if mode == "i2i" else "edit") + " 模式需提供 src_rel（原图 input 相对路径）"}, status=400)
     if mode == "ref" and not ref_rels:
@@ -1817,6 +1884,8 @@ async def assetgen_generate(req):
                 enh_txt += " · LoRA " + "+".join(
                     "%s%s" % (x["name"].split("/")[-1], ("×%g" % float(x["strength"])) if x.get("strength") not in (None, "") else "")
                     for x in loras_used)
+            if style_names:
+                enh_txt += " · 风格 " + "+".join(style_names)
             note = "Krea2 " + mode + " 真实生成" + enh_txt
         else:
             # 占位仅适用于 t2i（无 src）；其它模式无模型直接报错
@@ -1846,6 +1915,11 @@ async def assetgen_generate(req):
         "count": len(produced),
         "used_real": used_real,
         "note": note,
+        # 风格回执：`prompt` 是套用风格后的**实际**提示词（前端可回显，用户能看到风格改了什么）
+        "styles_used": style_names,
+        "styles_negative": style_negative,
+        "prompt_applied": prompt,
+        "prompt_input": raw_prompt,
         # LoRA 回执：前端据此提示"哪些没找到"，避免用户以为"选了没用"
         "loras_used": [x["name"] for x in loras_used],
         "loras_dropped": loras_dropped,
@@ -4393,6 +4467,8 @@ ROUTES = [
     ("POST", "/mrnext/skills/load_model", skills_load_model),
     ("POST", "/mrnext/skills/unload", skills_unload),
     ("POST", "/mrnext/skills/optimize", skills_optimize),
+    ("GET", "/mrnext/assetgen/styles", assetgen_styles),
+    ("GET", "/mrnext/assetgen/style_thumb", assetgen_style_thumb),
     ("GET", "/mrnext/favorites", favorites_list),
     ("POST", "/mrnext/favorites/add", favorites_add),
     ("POST", "/mrnext/favorites/remove", favorites_remove),

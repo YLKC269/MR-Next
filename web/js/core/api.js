@@ -93,6 +93,8 @@ export const StudioAPI = {
   },
   generate: (payload) => postJson("/mrnext/assetgen/generate", payload),
   enhanceImage: (payload) => postJson("/mrnext/assetgen/enhance", payload),
+  // Krea2 风格扩展库（3946 种，与 ComfyUI-Easy-Use/styles 同源）
+  assetgenStyles: (force) => getJson(`/mrnext/assetgen/styles${force ? "?force=1" : ""}`),
   seedvr2Status: () => getJson("/mrnext/assetgen/seedvr2_status"),
   vosr2Status: () => getJson("/mrnext/assetgen/vosr2_status"),
   // 时间线「清空」顺带清缓存：预览图 / 缩略图 / 旧分镜计划（避免旧缓存影响后续生成）

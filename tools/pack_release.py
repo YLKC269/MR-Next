@@ -65,6 +65,14 @@ INSTALL_NOTE = """MRBoard_Next v{ver} —— 安装说明
   models/vae/               minimax_h3_video_vae_* + minimax_h3_audio_vae_fp32
   models/loras/             可选（蒸馏 / 风格 LoRA）
 
+🎨 风格扩展（生图面板的「🎨 风格」按钮，3946 种）
+  本节点**不自带**风格文件，它直接读 ComfyUI-Easy-Use 的风格目录：
+    custom_nodes/ComfyUI-Easy-Use/styles/*.json     ← 风格定义（47 个 JSON）
+    custom_nodes/ComfyUI-Easy-Use/styles/samples/   ← 缩略图（3944 张）
+  把「风格扩展（放入custom_nodes）…/ComfyUI-Easy-Use/styles」里的 *.json 与 samples/
+  拷进上面这个目录即可（没装 Easy-Use 时，也可放到本包的 styles/ 下作为兜底）。
+  拷完在生图面板点「🎨 风格」→「↻ 刷新」即可看到全部风格，无需重启。
+
 升级：直接覆盖 custom_nodes/{pkg} 后重启（素材与成片在 input/ output/ 下，不受影响）。
 打包时间：{ts}
 """
